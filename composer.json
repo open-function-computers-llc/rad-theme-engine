@@ -1,0 +1,17 @@
+{
+    "name": "open-function-computers-llc/better-wordpress",
+    "description": "A suite of classes to make WordPress theme development cleaner",
+    "require": {
+        "php": ">=7.4",
+        "jjgrainger/posttypes": "^2.1",
+        "salesforce/handlebars-php": "^2.3"
+    },
+    "license": "MIT",
+    "keywords": ["wordpress", "handlebars", "theme"],
+    "minimum-stability": "stable",
+    "autoload": {
+        "psr-4": {
+            "ofc\\": "src/"
+        }
+    }
+}
