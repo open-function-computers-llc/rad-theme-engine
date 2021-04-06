@@ -6,4 +6,6 @@
 A composer package to make WordPress theme development cleaner
 
 ## More info to come soon...
-I'll write more documentation about this package soon, but for now it's something that you can include and make your theme dev easier
+I'll write more documentation about this package soon, but for now it's something that you can include and make your theme dev easier.
+
+For now, I'll just describe the system's behavior.
