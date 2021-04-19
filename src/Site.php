@@ -11,10 +11,9 @@ class Site
     private $config;
     private $hb;
 
-    public function __construct()
+    public function __construct($config = [])
     {
-        $config = [];
-        if (file_exists(TEMPLATEPATH . "/config.php")) {
+        if ($config == [] && file_exists(TEMPLATEPATH . "/config.php")) {
             $config = include(TEMPLATEPATH . "/config.php");
         }
 
@@ -121,6 +120,10 @@ class Site
 
     private function setUpHandlebars()
     {
+        if ($this->config["handlebars"] === false) {
+            return;
+        }
+
         $fileExtension = "tpl";
         if (is_array($this->config["handlebars"]) &&
             array_key_exists("template-extension", $this->config["handlebars"])
