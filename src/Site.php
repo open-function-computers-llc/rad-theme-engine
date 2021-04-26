@@ -148,4 +148,158 @@ class Site
     {
         return $this->hb->render($fileName, $data);
     }
+
+    public function getPost($id, $fields = [])
+    {
+        $p = get_post($id);
+        $meta = get_post_meta($p->ID);
+
+        if ($fields == []) {
+            return [
+                'post' => $p,
+                'meta' => $meta,
+            ];
+        }
+
+        $output = [];
+        $categories = [];
+        $taxonomies = [];
+        foreach ($fields as $key) {
+            // handle meta keys
+            if (substr($key, 0, 5) === "meta.") {
+                $output[substr($key, 5)] = get_post_meta($p->ID, substr($key, 5), true);
+                continue;
+            }
+
+            if (substr($key, 0, 4) === "acf.") {
+                $output[substr($key, 4)] = get_field(substr($key, 4), $p->ID);
+                continue;
+            }
+
+            if (substr($key, 0, 11) === "categories.") {
+                if (count($categories) == 0) {
+                    $categories = get_taxonomies($p->ID);
+                }
+                continue;
+            }
+
+            if (substr($key, 0, 9) === "taxonomy.") {
+                $taxonomyKey = $this->parseTaxKey($key);
+                $values = explode(",", $this->parseTaxValues($key));
+                if (!isset($taxonomies[$taxonomyKey])) {
+                    $taxonomies[$taxonomyKey] = $this->getPostTaxonomy($p, $taxonomyKey);
+                    $output[$taxonomyKey] = [];
+                }
+
+                foreach ($taxonomies[$taxonomyKey] as $tax) {
+                    $taxonomyDTO = [];
+                    foreach ($values as $val) {
+                        if ($val === "id" || $val === "term_id") {
+                            $taxonomyDTO["id"] = $tax->term_id;
+                            continue;
+                        }
+
+                        if ($val === "name") {
+                            $taxonomyDTO["name"] = $tax->name;
+                            continue;
+                        }
+
+                        if ($val === "slug") {
+                            $taxonomyDTO["slug"] = $tax->slug;
+                            continue;
+                        }
+
+                        if ($val === "description") {
+                            $taxonomyDTO["description"] = $tax->description;
+                            continue;
+                        }
+                    }
+                    $output[$taxonomyKey][] = $taxonomyDTO;
+                }
+                continue;
+            }
+
+            $output[$key] = $p->$key;
+        }
+        return $output;
+    }
+
+    public function getPosts($args = [], $fields = [])
+    {
+        $args = $this->processArgs($args);
+        $posts = get_posts($args);
+
+        if ($fields == []) {
+            return [
+                'posts' => $posts,
+            ];
+        }
+
+        $output = [];
+        $categories = [];
+
+        foreach ($posts as $post) {
+            foreach ($fields as $key) {
+                if (substr($key, 0, 4) === "acf.") {
+                    $addition[substr($key, 4)] = get_field(substr($key, 4), $post->ID);
+                } elseif (substr($key, 0, 11) === "categories.") {
+                    if (count($categories) == 0) {
+                        $categories = wp_get_post_categories($post->ID);
+                    }
+                } else {
+                    $addition[$key] = $post->$key;
+                }
+            }
+            $output[] = $addition;
+        }
+        return $output;
+    }
+
+    private function processArgs(array $args) : array
+    {
+        // wordpress default
+        $args = array_merge(
+            $args,
+            [
+                'numberposts' => 5,
+                'category' => 0,
+                'orderby' => 'date',
+                'order' => 'DESC',
+                'include' => array(),
+                'exclude' => array(),
+                'meta_key' => '',
+                'meta_value' => '',
+                'post_type' => 'post',
+                'suppress_filters' => true,
+            ]
+        );
+
+        if (isset($args["type"])) {
+            $args["post_type"] = $args["type"];
+        }
+        return $args;
+    }
+
+    private function parseTaxKey(string $paramater) : string
+    {
+        $parts = explode(".", $paramater);
+        if (count($parts) != 3) {
+            return $paramater;
+        }
+        return $parts[1];
+    }
+
+    private function parseTaxValues(string $paramater) : string
+    {
+        $parts = explode(".", $paramater);
+        if (count($parts) != 3) {
+            return $paramater;
+        }
+        return $parts[2];
+    }
+
+    public function getPostTaxonomy($post, $taxonomyKey)
+    {
+        return get_the_terms($post->ID, $taxonomyKey);
+    }
 }
