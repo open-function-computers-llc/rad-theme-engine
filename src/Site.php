@@ -5,6 +5,7 @@ namespace ofc;
 use PostTypes\PostType;
 use Handlebars\Handlebars;
 use Handlebars\Loader\FilesystemLoader;
+use WP_Post;
 
 class Site
 {
@@ -149,9 +150,17 @@ class Site
         return $this->hb->render($fileName, $data);
     }
 
-    public function getPost($id, $fields = [])
+    public function getPost($idOrPost, $fields = [])
     {
-        $p = get_post($id);
+        if (is_numeric($idOrPost)) {
+            $p = get_post($idOrPost);
+        } else if ($idOrPost instanceof WP_Post) {
+            $p = $idOrPost;
+        } else {
+            return [
+                "error" => "You must pass an ID or WP_Post to this method"
+            ];
+        }
         $meta = get_post_meta($p->ID);
 
         if ($fields == []) {
@@ -219,6 +228,21 @@ class Site
                 continue;
             }
 
+            // let's keep our sanity here...
+            // the following keys are here for convienance. WP names things so weirdly!
+            if ($key === "id") {
+                $output[$key] = $p->ID;
+                continue;
+            }
+            if ($key === "title" || $key === "name") {
+                $output[$key] = $p->post_title;
+                continue;
+            }
+            if ($key === "thumbnail") {
+                $output[$key] = get_the_post_thumbnail_url($p->ID);
+                continue;
+            }
+
             $output[$key] = $p->$key;
         }
         return $output;
@@ -236,21 +260,8 @@ class Site
         }
 
         $output = [];
-        $categories = [];
-
-        foreach ($posts as $post) {
-            foreach ($fields as $key) {
-                if (substr($key, 0, 4) === "acf.") {
-                    $addition[substr($key, 4)] = get_field(substr($key, 4), $post->ID);
-                } elseif (substr($key, 0, 11) === "categories.") {
-                    if (count($categories) == 0) {
-                        $categories = wp_get_post_categories($post->ID);
-                    }
-                } else {
-                    $addition[$key] = $post->$key;
-                }
-            }
-            $output[] = $addition;
+        foreach ($posts as $p) {
+            $output[] = $this->getPost($p, $fields);
         }
         return $output;
     }
@@ -259,7 +270,6 @@ class Site
     {
         // wordpress default
         $args = array_merge(
-            $args,
             [
                 'numberposts' => 5,
                 'category' => 0,
@@ -271,7 +281,8 @@ class Site
                 'meta_value' => '',
                 'post_type' => 'post',
                 'suppress_filters' => true,
-            ]
+            ],
+            $args
         );
 
         if (isset($args["type"])) {
@@ -301,5 +312,12 @@ class Site
     public function getPostTaxonomy($post, $taxonomyKey)
     {
         return get_the_terms($post->ID, $taxonomyKey);
+    }
+
+    public function setPostMeta($postID, $data)
+    {
+        foreach ($data as $metaKey => $metaValue) {
+            update_post_meta($postID, $metaKey, $metaValue);
+        }
     }
 }
