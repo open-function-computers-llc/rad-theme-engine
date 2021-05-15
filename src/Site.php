@@ -44,6 +44,37 @@ class Site
 
         // register custom post types
         $this->registerCPTs();
+
+        // add mix static assets
+        $this->includeManifestFiles();
+    }
+
+    private function includeManifestFiles()
+    {
+        $manifestFile = get_template_directory() . "/dist/mix-manifest.json";
+        if (!file_exists($manifestFile)) {
+            return;
+        }
+
+        $items = json_decode(file_get_contents($manifestFile), true);
+        foreach ($items as $file => $version) {
+            $extension = end(explode(".", $file));
+            $tag = $this->stringify($file);
+            if ($extension === "js") {
+                add_action('wp_enqueue_scripts', function () use ($file, $version, $tag) {
+                    wp_register_script($tag, get_template_directory_uri() . '/dist/' . $version, [], '', false);
+                    wp_enqueue_script($tag);
+                });
+                continue;
+            }
+
+            if ($extension === "css") {
+                add_action('wp_enqueue_scripts', function () use ($version, $tag) {
+                    wp_enqueue_style($tag, get_template_directory_uri() . '/dist/' . $version);
+                });
+                continue;
+            }
+        }
     }
 
     private function registerCPTs()
@@ -132,6 +163,10 @@ class Site
             $fileExtension = $this->config["handlebars"]["template-extension"];
         }
         $partialsDir = get_template_directory()."/tpl";
+        if (!file_exists($partialsDir) && !is_dir($partialsDir)) {
+            $this->adminError("Your Handlebars directory is not setup correctly or doesn't exist.");
+            return;
+        }
         $partialsLoader = new FilesystemLoader($partialsDir, ["extension" => $fileExtension]);
 
         $this->hb = new Handlebars([
@@ -140,8 +175,10 @@ class Site
             "enableDataVariables" => true,
         ]);
 
-        foreach ($this->config["handlebars"]["additional-helpers"] as $name => $callback) {
-            $this->hb->addHelper($name, $callback);
+        if (isset($this->config["handlebars"]["additional-helpers"])) {
+            foreach ($this->config["handlebars"]["additional-helpers"] as $name => $callback) {
+                $this->hb->addHelper($name, $callback);
+            }
         }
     }
 
@@ -319,5 +356,34 @@ class Site
         foreach ($data as $metaKey => $metaValue) {
             update_post_meta($postID, $metaKey, $metaValue);
         }
+    }
+
+    /**
+     * add an error to the wordpress backend
+     *
+     * @param string $message
+     */
+    private function adminError(string $message)
+    {
+        $key = strtolower(str_replace(" ", "_", $message));
+        add_action('admin_notices', function ($messages) use ($message, $key) {
+                add_settings_error($key, '', "OFC Site Error: $message", 'error');
+                settings_errors($key);
+            return $messages;
+        });
+    }
+
+    public function renderMenu($menuLocation)
+    {
+        wp_nav_menu([
+            "theme_location" => $menuLocation
+        ]);
+    }
+
+    private function stringify(string $thing) : string
+    {
+        $bad = [" ", "/"];
+        $good = ["_", ""];
+        return strtolower(str_replace($bad, $good, $thing));
     }
 }
