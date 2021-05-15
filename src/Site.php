@@ -47,6 +47,9 @@ class Site
 
         // add mix static assets
         $this->includeManifestFiles();
+
+        // register ACF options pages
+        $this->addOptionsPages();
     }
 
     private function includeManifestFiles()
@@ -104,6 +107,29 @@ class Site
                 define('DISALLOW_FILE_EDIT', true);
                 continue;
             }
+        }
+    }
+
+    private function addOptionsPages()
+    {
+        if (!array_key_exists('options-pages', $this->config)) {
+            return;
+        }
+
+        if (!function_exists("acf_add_options_page")) {
+            $this->adminError("You can't register options pages without the Pro version of Advanced Custom Fields.");
+        }
+
+        $i = 100;
+        foreach ($this->config["options-pages"] as $pageTitle) {
+            acf_add_options_page([
+                "page_title" => $pageTitle,
+                "menu_title" => $pageTitle,
+                "menu_slug" => $this->stringify($pageTitle),
+                'capability' => 'edit_posts',
+                "position" => $i,
+            ]);
+            $i++;
         }
     }
 
