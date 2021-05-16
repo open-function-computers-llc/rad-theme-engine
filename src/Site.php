@@ -5,6 +5,7 @@ namespace ofc;
 use PostTypes\PostType;
 use Handlebars\Handlebars;
 use Handlebars\Loader\FilesystemLoader;
+use PostTypes\Taxonomy;
 use WP_Post;
 
 class Site
@@ -86,6 +87,7 @@ class Site
             return;
         }
 
+        $cptTaxonomies = [];
         foreach ($this->config['custom-post-types'] as $cpt) {
             if (!isset($cpt['slug'])) {
                 dd($cpt);
@@ -96,7 +98,24 @@ class Site
             if (isset($cpt['icon'])) {
                 $newCpt->icon($cpt['icon']);
             }
+
+            if (isset($cpt["taxonomies"])) {
+                foreach ($cpt["taxonomies"] as $customTaxonomy) {
+                    $cptTaxonomies[] = $customTaxonomy;
+                    $newCpt->taxonomy($customTaxonomy);
+                }
+            }
             $newCpt->register();
+        }
+
+        if (count($cptTaxonomies)) {
+            foreach ($cptTaxonomies as $customTaxonomy) {
+                $tax = new Taxonomy($customTaxonomy);
+                $tax->options([
+                    'hierarchical' => false,
+                ]);
+                $tax->register();
+            }
         }
     }
 
@@ -391,7 +410,7 @@ class Site
      */
     private function adminError(string $message)
     {
-        $key = strtolower(str_replace(" ", "_", $message));
+        $key = $this->stringify($message);
         add_action('admin_notices', function ($messages) use ($message, $key) {
                 add_settings_error($key, '', "OFC Site Error: $message", 'error');
                 settings_errors($key);
@@ -401,8 +420,9 @@ class Site
 
     public function renderMenu($menuLocation)
     {
-        wp_nav_menu([
-            "theme_location" => $menuLocation
+        return wp_nav_menu([
+            "theme_location" => $menuLocation,
+            "echo" => false,
         ]);
     }
 
@@ -411,5 +431,15 @@ class Site
         $bad = [" ", "/"];
         $good = ["_", ""];
         return strtolower(str_replace($bad, $good, $thing));
+    }
+
+    public function getAssetURL(string $filename) : string
+    {
+        if (!file_exists(get_template_directory()."/assets/$filename")) {
+            $this->adminError("Requested asset $filename doesn't exist.");
+            return "";
+        }
+
+        return get_template_directory_uri()."/assets/$filename";
     }
 }
