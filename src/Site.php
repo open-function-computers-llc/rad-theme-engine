@@ -405,6 +405,14 @@ class Site
         if (isset($args["type"])) {
             $args["post_type"] = $args["type"];
         }
+
+        if (isset($args["title"])) {
+            $args["title"] = urldecode($args["title"]);
+        }
+
+        if (isset($args["s"])) {
+            $args["s"] = urldecode($args["s"]);
+        }
         return $args;
     }
 
