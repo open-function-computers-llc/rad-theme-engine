@@ -236,7 +236,7 @@ class Site
     {
         if (is_numeric($idOrPost)) {
             $p = get_post($idOrPost);
-        } else if ($idOrPost instanceof WP_Post) {
+        } elseif ($idOrPost instanceof WP_Post) {
             $p = $idOrPost;
         } else {
             return [
@@ -344,6 +344,41 @@ class Site
         $output = [];
         foreach ($posts as $p) {
             $output[] = $this->getPost($p, $fields);
+        }
+        return $output;
+    }
+
+    public function getTerm($slug, $fields = [])
+    {
+        $args = [
+            'taxonomy' => $slug,
+            'hide_empty' => false,
+        ];
+        $results = get_terms($args);
+
+        if ($fields == []) {
+            return $results;
+        }
+
+        $output = [];
+        foreach ($results as $term) {
+            $append = [];
+            foreach ($fields as $key) {
+                $oldKey = $key;
+                if ($key == "id") {
+                    $key = "term_id";
+                }
+                if ($key == "title") {
+                    $key = "name";
+                }
+
+                if ($oldKey != $key) {
+                    $append[$oldKey] = $term->$key;
+                    continue;
+                }
+                $append[$key] = $term->$key;
+            }
+            $output[] = $append;
         }
         return $output;
     }
