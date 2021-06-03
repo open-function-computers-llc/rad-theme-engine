@@ -413,6 +413,23 @@ class Site
         if (isset($args["s"])) {
             $args["s"] = urldecode($args["s"]);
         }
+
+        // process custom taxonomy
+        $taxQuery = [];
+        foreach ($args as $paramKey => $paramValue) {
+            if (substr($paramKey, 0, 4) === "tax.") {
+                $tax = substr($paramKey, 4);
+                $taxQuery[] = [
+                    "taxonomy" => $tax,
+                    "field" => "term_id",
+                    "terms" => explode(",", $paramValue)
+                ];
+            }
+        }
+        if ($taxQuery != []) {
+            $args['tax_query'] = $taxQuery;
+        }
+
         return $args;
     }
 
