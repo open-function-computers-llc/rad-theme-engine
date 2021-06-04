@@ -282,6 +282,10 @@ class Site
                     $output[$taxonomyKey] = [];
                 }
 
+                if (!is_array($taxonomies[$taxonomyKey])) {
+                    continue;
+                }
+
                 foreach ($taxonomies[$taxonomyKey] as $tax) {
                     $taxonomyDTO = [];
                     foreach ($values as $val) {
