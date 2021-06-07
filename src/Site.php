@@ -12,6 +12,8 @@ class Site
 {
     private $config;
     private $hb;
+    private $partialsDir;
+    private $fileExtension;
 
     public function __construct($config = [])
     {
@@ -201,18 +203,18 @@ class Site
             return;
         }
 
-        $fileExtension = "tpl";
+        $this->fileExtension = "tpl";
         if (is_array($this->config["handlebars"]) &&
             array_key_exists("template-extension", $this->config["handlebars"])
         ) {
-            $fileExtension = $this->config["handlebars"]["template-extension"];
+            $this->fileExtension = $this->config["handlebars"]["template-extension"];
         }
-        $partialsDir = get_template_directory()."/tpl";
-        if (!file_exists($partialsDir) && !is_dir($partialsDir)) {
+        $this->partialsDir = get_template_directory()."/tpl";
+        if (!file_exists($this->partialsDir) && !is_dir($this->partialsDir)) {
             $this->adminError("Your Handlebars directory is not setup correctly or doesn't exist.");
             return;
         }
-        $partialsLoader = new FilesystemLoader($partialsDir, ["extension" => $fileExtension]);
+        $partialsLoader = new FilesystemLoader($this->partialsDir, ["extension" => $this->fileExtension]);
 
         $this->hb = new Handlebars([
             "loader" => $partialsLoader,
@@ -229,6 +231,15 @@ class Site
 
     public function view(string $fileName, array $data = []) : string
     {
+        $filePath = $this->partialsDir."/".$fileName.".".$this->fileExtension;
+        if (!file_exists($filePath)) {
+            if ($this->config["debug"] === true) {
+                return "<pre>View {$fileName}.{$this->fileExtension} does not exist.\nData:\n"
+                    .print_r($data, true)
+                    ."</pre>";
+            }
+            return "";
+        }
         return $this->hb->render($fileName, $data);
     }
 
@@ -243,12 +254,11 @@ class Site
                 "error" => "You must pass an ID or WP_Post to this method"
             ];
         }
-        $meta = get_post_meta($p->ID);
 
         if ($fields == []) {
             return [
                 'post' => $p,
-                'meta' => $meta,
+                'meta' => get_post_meta($p->ID),
             ];
         }
 
@@ -256,6 +266,12 @@ class Site
         $categories = [];
         $taxonomies = [];
         foreach ($fields as $key) {
+            // handle post content
+            if ($key === "content") {
+                $output["content"] = get_the_content($p->ID);
+                continue;
+            }
+
             // handle meta keys
             if (substr($key, 0, 5) === "meta.") {
                 $output[substr($key, 5)] = get_post_meta($p->ID, substr($key, 5), true);
@@ -352,11 +368,33 @@ class Site
         return $output;
     }
 
+    /**
+     * getCurrentPosts
+     * get all the posts for the current page as defined by wordpress' weird rules for archive pages
+     *
+     * @param array $fields
+     * @return void
+     */
+    public function getCurrentPosts($fields = [])
+    {
+        $output = [];
+        if (!have_posts()) {
+            return $output;
+        }
+        while (have_posts()) {
+            the_post();
+            global $post;
+            $output[] = $this->getPost($post, $fields);
+        }
+        return $output;
+    }
+
     public function getTerm($slug, $fields = [])
     {
         $args = [
             'taxonomy' => $slug,
             'hide_empty' => false,
+            'suppress_filter' => true,
         ];
         $results = get_terms($args);
 
@@ -378,6 +416,11 @@ class Site
 
                 if ($oldKey != $key) {
                     $append[$oldKey] = $term->$key;
+                    continue;
+                }
+
+                if ($key === "url") {
+                    $append["url"] = get_term_link($term);
                     continue;
                 }
                 $append[$key] = $term->$key;
