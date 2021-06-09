@@ -31,7 +31,11 @@ class Site
         if (isset($this->config["disable"])) {
             $this->disable($this->config["disable"]);
         }
-        // enable various things
+
+        // enable various things, starting with TinyMCE
+        if (isset($this->config["tinyMCEAdditions"])) {
+            $this->addEditorStyles();
+        }
         if (isset($this->config["enable"])) {
             $this->enable($this->config["enable"]);
         }
@@ -53,6 +57,15 @@ class Site
 
         // register ACF options pages
         $this->addOptionsPages();
+    }
+
+    private function addEditorStyles()
+    {
+        $formats = $this->config["tinyMCEAdditions"];
+        add_filter('tiny_mce_before_init', function ($settings) use ($formats) {
+            $settings['style_formats'] = json_encode($formats);
+            return $settings;
+        });
     }
 
     private function includeManifestFiles()
@@ -159,10 +172,20 @@ class Site
         foreach ($keys as $key) {
             if ($key === "post-thumbnails") {
                 add_theme_support('post-thumbnails');
+                continue;
             }
             if ($key === "menus") {
                 add_theme_support('menus');
+                continue;
             }
+            if ($key === "styleselect") {
+                add_filter('mce_buttons_2', function ($buttons) {
+                    return array_merge(['styleselect'], $buttons);
+                });
+                continue;
+            }
+
+            $this->adminError("Couldn't enable feature `$key`");
         }
     }
 
