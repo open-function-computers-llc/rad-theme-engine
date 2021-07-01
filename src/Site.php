@@ -338,6 +338,11 @@ class Site
                             continue;
                         }
 
+                        if ($val === "title") {
+                            $taxonomyDTO["title"] = $tax->name;
+                            continue;
+                        }
+
                         if ($val === "slug") {
                             $taxonomyDTO["slug"] = $tax->slug;
                             continue;
