@@ -105,10 +105,12 @@ class Site
         $cptTaxonomies = [];
         foreach ($this->config['custom-post-types'] as $cpt) {
             if (!isset($cpt['slug'])) {
-                dd($cpt);
+                $this->adminError("To register a new custom post type, you must set the `slug` key.");
+                continue;
             }
             $options = $cpt['options'] ?? [];
-            $newCpt = new PostType($cpt['slug'], $options);
+            $names = $this->generateLabels($cpt['slug']);
+            $newCpt = new PostType($cpt['slug'], $options, $names);
 
             if (isset($cpt['icon'])) {
                 $newCpt->icon($cpt['icon']);
@@ -121,6 +123,16 @@ class Site
                 }
             }
             $newCpt->register();
+
+            // disable post type things here
+            if (isset($cpt["disable"]) && is_array($cpt["disable"])) {
+                foreach ($cpt["disable"] as $feature) {
+                    if (strtolower($feature) === "yoast") {
+                        add_action('add_meta_boxes', fn () => remove_meta_box('wpseo_meta', $cpt['slug'], 'normal'), 100);
+                        continue;
+                    }
+                }
+            }
         }
 
         if (count($cptTaxonomies)) {
@@ -289,9 +301,21 @@ class Site
         $categories = [];
         $taxonomies = [];
         foreach ($fields as $key) {
+            // handle url/permalink
+            if ($key === "url" || $key === "permalink") {
+                $output[$key] = get_permalink($p->ID);
+                continue;
+            }
+
             // handle post content
             if ($key === "content") {
-                $output["content"] = get_the_content($p->ID);
+                $output["content"] = apply_filters('the_content', get_the_content($p->ID));
+                continue;
+            }
+
+            // handle post excerpt
+            if ($key === "excerpt") {
+                $output["excerpt"] = get_the_excerpt($p->ID);
                 continue;
             }
 
@@ -308,7 +332,22 @@ class Site
 
             if (substr($key, 0, 11) === "categories.") {
                 if (count($categories) == 0) {
-                    $categories = get_taxonomies($p->ID);
+                    $categories = wp_get_post_categories($p->ID, ["fields" => "all"]);
+                    $attrs = explode(",", substr($key, 11));
+
+                    foreach ($categories as $cat) {
+                        $dataToAppend = [];
+                        foreach ($attrs as $key) {
+                            $oldKey = $key;
+                            if ($key == "id") {
+                                $key = "term_id";
+                            }
+                            if (isset($cat->$key)) {
+                                $dataToAppend[$oldKey] = $cat->$key;
+                            }
+                        }
+                        $output["categories"][] = $dataToAppend;
+                    }
                 }
                 continue;
             }
@@ -401,9 +440,9 @@ class Site
      * get all the posts for the current page as defined by wordpress' weird rules for archive pages
      *
      * @param array $fields
-     * @return void
+     * @return array
      */
-    public function getCurrentPosts($fields = [])
+    public function getCurrentPosts($fields = []) : array
     {
         $output = [];
         if (!have_posts()) {
@@ -447,8 +486,8 @@ class Site
                     continue;
                 }
 
-                if ($key === "url") {
-                    $append["url"] = get_term_link($term);
+                if ($key === "url" || $key === "permalink") {
+                    $append[$key] = get_term_link($term);
                     continue;
                 }
                 $append[$key] = $term->$key;
@@ -576,5 +615,72 @@ class Site
         }
 
         return get_template_directory_uri()."/assets/$filename";
+    }
+
+    private function generateLabels(string $slug) : array
+    {
+        return [
+            'name' => $this->humanize($slug, true),
+            'singular_name' => $this->humanize($slug, false),
+            'menu_name' => $this->humanize($slug, true),
+            'all_items' => "All " . $this->humanize($slug, true),
+            'add_new' => "Add New",
+            'add_new_item' => "Add New {$this->humanize($slug, false)}",
+            'edit_item' => "Edit {$this->humanize($slug, false)}",
+            'new_item' => "New {$this->humanize($slug, false)}",
+            'view_item' => "View {$this->humanize($slug, false)}",
+            'search_items' => "Search {$this->humanize($slug, true)}",
+            'not_found' => "No {$this->humanize($slug, true)} found",
+            'not_found_in_trash' => "No {$this->humanize($slug, true)} found in Trash",
+            'parent_item_colon' => "Parent {$this->humanize($slug, false)}:",
+        ];
+    }
+
+    private function humanize(string $word, bool $makePlural = false) : string
+    {
+        $humanized = ucwords(strtolower(str_replace(['-', '_'], ' ', $word)));
+
+        if (!$makePlural) {
+            return $humanized;
+        }
+
+        if (strtolower(substr($humanized, strlen($humanized)-1, 1)) == "s") {
+            return $humanized . "es";
+        }
+        if (strtolower(substr($humanized, strlen($humanized)-1, 1)) == "y") {
+            return substr($humanized, 0, strlen($humanized)-1) . "ies";
+        }
+        return $humanized;
+    }
+
+    public function getPaginationLinks() : array
+    {
+        global $wp_query;
+
+        $output = [
+            "older" => false,
+            "newer" => false,
+            "totalPages" => 0,
+            "currentPage" => 0,
+        ];
+
+        if (is_singular()) {
+            return $output;
+        }
+
+        $max_num_pages = (int) $wp_query->max_num_pages;
+        $paged = get_query_var('paged');
+        if (($paged + 1) < $max_num_pages) {
+            $output["older"] = next_posts(0, false);
+        }
+
+        if ($max_num_pages > 1 && $paged <= $max_num_pages && $paged > 0) {
+            $output["newer"] = previous_posts(false);
+        }
+
+        $output["totalPages"] = $max_num_pages;
+        $output["currentPage"] = $paged;
+
+        return $output;
     }
 }
