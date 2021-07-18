@@ -264,6 +264,27 @@ class Site
         }
     }
 
+    /**
+     * render
+     * See $this->view()
+     *
+     * @param string $fileName
+     * @param array $data
+     * @return string
+     */
+    public function render(string $fileName, array $data = []) : string
+    {
+        return $this->view($fileName, $data);
+    }
+
+    /**
+     * view
+     * Invoke handlebar rendering engine for a given template file and data array
+     *
+     * @param string $fileName
+     * @param array $data
+     * @return string
+     */
     public function view(string $fileName, array $data = []) : string
     {
         $filePath = $this->partialsDir."/".$fileName.".".$this->fileExtension;
@@ -437,12 +458,26 @@ class Site
 
     /**
      * getCurrentPosts
-     * get all the posts for the current page as defined by wordpress' weird rules for archive pages
+     * see getDefaultPosts
+     *
+     * @deprecated 1.0.15
      *
      * @param array $fields
      * @return array
      */
     public function getCurrentPosts($fields = []) : array
+    {
+        return $this->getDefaultPosts($fields);
+    }
+
+    /**
+     * getDefaultPosts
+     * get all the posts for the current page as defined by wordpress' weird rules for archive pages
+     *
+     * @param array $fields
+     * @return array
+     */
+    public function getDefaultPosts($fields = []) : array
     {
         $output = [];
         if (!have_posts()) {
