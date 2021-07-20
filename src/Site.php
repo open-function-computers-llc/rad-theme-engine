@@ -133,6 +133,24 @@ class Site
                     }
                 }
             }
+
+            // set up any ACF CPT options pages here
+            if (isset($cpt["options-pages"])) {
+                if (!function_exists("acf_add_options_page")) {
+                    $this->adminError("You can't register options pages without the Pro version of Advanced Custom Fields.");
+                    continue;
+                }
+                foreach ($cpt["options-pages"] as $optionsPageTitle) {
+                    acf_add_options_page([
+                        "page_title" => $optionsPageTitle,
+                        "menu_title" => $optionsPageTitle,
+                        "menu_slug" => $this->stringify($optionsPageTitle),
+                        'capability' => 'edit_posts',
+                        "position" => 100,
+                        "parent_slug" => "edit.php?post_type=" . $cpt["slug"]
+                    ]);
+                }
+            }
         }
 
         if (count($cptTaxonomies)) {
@@ -659,7 +677,7 @@ class Site
             'singular_name' => $this->humanize($slug, false),
             'menu_name' => $this->humanize($slug, true),
             'all_items' => "All " . $this->humanize($slug, true),
-            'add_new' => "Add New",
+            'add_new' => "Add New {$this->humanize($slug, false)}",
             'add_new_item' => "Add New {$this->humanize($slug, false)}",
             'edit_item' => "Edit {$this->humanize($slug, false)}",
             'new_item' => "New {$this->humanize($slug, false)}",
@@ -685,7 +703,7 @@ class Site
         if (strtolower(substr($humanized, strlen($humanized)-1, 1)) == "y") {
             return substr($humanized, 0, strlen($humanized)-1) . "ies";
         }
-        return $humanized;
+        return $humanized . "s";
     }
 
     public function getPaginationLinks() : array
