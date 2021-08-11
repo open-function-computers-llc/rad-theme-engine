@@ -33,7 +33,7 @@ class Site
         }
 
         // enable various things, starting with TinyMCE
-        if (isset($this->config["tinyMCEAdditions"])) {
+        if (isset($this->config["tinyMCEAdditions"]) || isset($this->config["tiny-mce-additions"])) {
             $this->addEditorStyles();
         }
         if (isset($this->config["enable"])) {
@@ -61,7 +61,15 @@ class Site
 
     private function addEditorStyles()
     {
-        $formats = $this->config["tinyMCEAdditions"];
+        $formats = [];
+
+        if (isset($this->config["tinyMCEAdditions"])) {
+            $formats = $this->config["tinyMCEAdditions"];
+        }
+
+        if (isset($this->config["tiny-mce-additions"])) {
+            $formats = $this->config["tiny-mce-additions"];
+        }
         add_filter('tiny_mce_before_init', function ($settings) use ($formats) {
             $settings['style_formats'] = json_encode($formats);
             return $settings;
