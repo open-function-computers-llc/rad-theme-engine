@@ -70,8 +70,132 @@ class Site
         if (isset($this->config["tiny-mce-additions"])) {
             $formats = $this->config["tiny-mce-additions"];
         }
-        add_filter('tiny_mce_before_init', function ($settings) use ($formats) {
-            $settings['style_formats'] = json_encode($formats);
+
+        $defaults = [
+            [
+                'title' => 'Headings',
+                'items' => [
+                    [
+                        'title' => 'Heading 1',
+                        'format' => 'h1',
+                    ],
+                    [
+                        'title' => 'Heading 2',
+                        'format' => 'h2',
+                    ],
+                    [
+                        'title' => 'Heading 3',
+                        'format' => 'h3',
+                    ],
+                    [
+                        'title' => 'Heading 4',
+                        'format' => 'h4',
+                    ],
+                    [
+                        'title' => 'Heading 5',
+                        'format' => 'h5',
+                    ],
+                    [
+                        'title' => 'Heading 6',
+                        'format' => 'h6',
+                    ],
+                ],
+            ],
+            [
+                'title' => 'Inline',
+                'items' => [
+                    [
+                        'title' => 'Bold',
+                        'format' => 'bold',
+                        'icon' => 'bold',
+                    ],
+                    [
+                        'title' => 'Italic',
+                        'format' => 'italic',
+                        'icon' => 'italic',
+                    ],
+                    [
+                        'title' => 'Underline',
+                        'format' => 'underline',
+                        'icon' => 'underline',
+                    ],
+                    [
+                        'title' => 'Strikethrough',
+                        'format' => 'strikethrough',
+                        'icon' => 'strikethrough',
+                    ],
+                    [
+                        'title' => 'Superscript',
+                        'format' => 'superscript',
+                        'icon' => 'superscript',
+                    ],
+                    [
+                        'title' => 'Subscript',
+                        'format' => 'subscript',
+                        'icon' => 'subscript',
+                    ],
+                    [
+                        'title' => 'Code',
+                        'format' => 'code',
+                        'icon' => 'code',
+                    ],
+                ],
+            ],
+            [
+                'title' => 'Blocks',
+                'items' => [
+                    [
+                        'title' => 'Paragraph',
+                        'format' => 'p',
+                    ],
+                    [
+                        'title' => 'Blockquote',
+                        'format' => 'blockquote',
+                    ],
+                    [
+                        'title' => 'Div',
+                        'format' => 'div',
+                    ],
+                    [
+                        'title' => 'Pre',
+                        'format' => 'pre',
+                    ],
+                ],
+            ],
+            [
+                'title' => 'Alignment',
+                'items' => [
+                    [
+                        'title' => 'Left',
+                        'format' => 'alignleft',
+                        'icon' => 'alignleft',
+                    ],
+                    [
+                        'title' => 'Center',
+                        'format' => 'aligncenter',
+                        'icon' => 'aligncenter',
+                    ],
+                    [
+                        'title' => 'Right',
+                        'format' => 'alignright',
+                        'icon' => 'alignright',
+                    ],
+                    [
+                        'title' => 'Justify',
+                        'format' => 'alignjustify',
+                        'icon' => 'alignjustify',
+                    ],
+                ],
+            ],
+        ];
+
+        add_filter('tiny_mce_before_init', function ($settings) use ($formats, $defaults) {
+            $settings['style_formats'] = json_encode(array_merge($defaults, [
+                [
+                    "title" => "Custom",
+                    "items" => $formats
+                ]
+            ]));
             return $settings;
         });
     }
@@ -592,14 +716,36 @@ class Site
         // process custom taxonomy
         $taxQuery = [];
         foreach ($args as $paramKey => $paramValue) {
+            if (!(substr($paramKey, 0, 4) === "tax." || substr($paramKey, 0, 9) === "taxonomy.")) {
+                continue;
+            }
+
             if (substr($paramKey, 0, 4) === "tax.") {
                 $tax = substr($paramKey, 4);
-                $taxQuery[] = [
-                    "taxonomy" => $tax,
-                    "field" => "term_id",
-                    "terms" => explode(",", $paramValue)
-                ];
             }
+
+            if (substr($paramKey, 0, 9) === "taxonomy.") {
+                $tax = substr($paramKey, 9);
+            }
+
+            $field = "slug";
+            $values = explode(",", $paramValue);
+            $allValuesAreNumeric = false;
+            foreach ($values as $v) {
+                if (is_numeric($v)) {
+                    $allValuesAreNumeric = true;
+                }
+            }
+
+            if ($allValuesAreNumeric) {
+                $field = "term_id";
+            }
+
+            $taxQuery[] = [
+                "taxonomy" => $tax,
+                "field" => $field,
+                "terms" => $values,
+            ];
         }
         if ($taxQuery != []) {
             $args['tax_query'] = $taxQuery;
