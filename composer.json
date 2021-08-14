@@ -13,5 +13,8 @@
         "psr-4": {
             "ofc\\": "src/"
         }
+    },
+    "scripts": {
+        "post-install-cmd": "ofc\\BetterWordpress::setup"
     }
 }
