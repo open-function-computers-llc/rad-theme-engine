@@ -15,6 +15,6 @@
         }
     },
     "scripts": {
-        "post-install-cmd": "ofc\\BetterWordpress::setup"
+        "post-create-project-cmd": "ofc\\BetterWordpress::setup"
     }
 }
