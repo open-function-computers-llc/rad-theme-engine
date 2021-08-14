@@ -7,9 +7,11 @@ class BetterWordpress
     public static function setup()
     {
         self::say("Now setting up your new WordPress theme.");
-        $text = self::ask("Press any key to continue");
+        self::ask("Press any key to continue");
 
-        self::say("You typed $text");
+        $themeName = self::ask("What is the name of your new theme?");
+
+        mkdir(Util::slugify($themeName));
     }
 
     private static function say(string $thing)
