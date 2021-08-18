@@ -14,6 +14,7 @@ class Site
     private $hb;
     private $partialsDir;
     private $fileExtension;
+    private $templateDirectory;
 
     public function __construct($config = [])
     {
@@ -394,7 +395,15 @@ class Site
         ) {
             $this->fileExtension = $this->config["handlebars"]["template-extension"];
         }
-        $this->partialsDir = get_template_directory()."/tpl";
+
+        $this->templateDirectory = "tpl";
+        if (is_array($this->config["handlebars"]) &&
+            array_key_exists("template-directory", $this->config["handlebars"])
+        ) {
+            $this->templateDirectory = $this->config["handlebars"]["template-directory"];
+        }
+
+        $this->partialsDir = get_template_directory()."/".$this->templateDirectory;
         if (!file_exists($this->partialsDir) && !is_dir($this->partialsDir)) {
             $this->adminError("Your Handlebars directory is not setup correctly or doesn't exist.");
             return;
