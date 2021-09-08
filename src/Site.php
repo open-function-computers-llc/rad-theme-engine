@@ -552,6 +552,11 @@ class Site
                             continue;
                         }
 
+                        if ($val === "link") {
+                            $taxonomyDTO["link"] = get_term_link($tax);
+                            continue;
+                        }
+
                         if ($val === "name") {
                             $taxonomyDTO["name"] = $tax->name;
                             continue;
