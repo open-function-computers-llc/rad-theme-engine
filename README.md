@@ -5,7 +5,7 @@ A suite of utilities to aide in the development of WordPress themes and make the
 <br><br>
 
 [![Latest Stable Version](https://poser.pugx.org/open-function-computers-llc/better-wordpress/v/stable.svg)](https://packagist.org/packages/open-function-computers-llc/better-wordpress) [![Downloads](https://poser.pugx.org/open-function-computers-llc/better-wordpress/d/total.svg)](https://packagist.org/packages/open-function-computers-llc/better-wordpress)<br>
-📦 &nbsp;[View on Packagist](https://packagist.org/packages/open-function-computers-llc/better-wordpress)
+📦 &nbsp;[View on Packagist](https://packagist.org/packages/open-function-computers-llc/better-wordpress) <br>
 📃 &nbsp;[Read the Docs](https://better-wordpress.ofco.cloud/)
 <br>
 
