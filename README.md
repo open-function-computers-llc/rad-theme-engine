@@ -30,7 +30,7 @@ npm install
 And that's it! Read about advanced installations and asset bundling on [the docs](https://better-wordpress.ofco.cloud/).
 
 ## Example Projects
-- [Shirt Store](#) – Demonstrates custom post types, taxonomies, handlebars, and more.
+- [Shirt Store](https://github.com/open-function-computers-llc/better-wp-example-theme) – Demonstrates custom post types, taxonomies, handlebars, and more.
 
 ## Authors
 - Kurtis Holsapple – [@lapubell](https://github.com/lapubell)
