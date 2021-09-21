@@ -1,5 +1,5 @@
 <p align="center">
-<img src="https://better-wordpress.ofco.cloud/images/of-bw-logo.png" alt="ofc-logo" style="max-width:600px;width:100%" />
+<img src="https://better-wordpress.ofco.cloud/images/of-bw-logo.png" alt="ofc-logo" style="max-width:500px; />
 </p>
 A suite of utilities to aide in the development of WordPress themes and make the experience less painful.
 <br><br>
