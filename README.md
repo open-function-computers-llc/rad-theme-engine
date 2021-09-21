@@ -1,5 +1,5 @@
 <p align="center">
-<img src="./of-better-wp.png" alt="ofc-logo" style="max-width:800px;width:100%" />
+<img src="./of-better-banner.png" alt="ofc-logo" style="max-width:800px;width:100%" />
 </p>
 A suite of utilities to aide in the development of WordPress themes and make the experience less painful.
 <br><br>
