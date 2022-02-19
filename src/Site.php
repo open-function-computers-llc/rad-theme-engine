@@ -20,8 +20,6 @@ class Site
     {
         if ($config == [] && file_exists(TEMPLATEPATH . "/config.php")) {
             $config = include(TEMPLATEPATH . "/config.php");
-        } elseif ($config == [] && file_exists(get_stylesheet_directory() . "/config.php")) {
-            $config = include(get_stylesheet_directory() . "/config.php");
         }
 
         $this->config = $config;
@@ -304,10 +302,6 @@ class Site
         foreach ($keys as $key) {
             if ($key === "editor") {
                 define('DISALLOW_FILE_EDIT', true);
-                add_action('admin_init', function () {
-                    remove_submenu_page('plugins.php', 'plugin-editor.php');
-                    remove_submenu_page('themes.php', 'theme-editor.php');
-                });
                 continue;
             }
         }
@@ -411,13 +405,8 @@ class Site
 
         $this->partialsDir = get_template_directory()."/".$this->templateDirectory;
         if (!file_exists($this->partialsDir) && !is_dir($this->partialsDir)) {
-            // check for child theme?
-            $this->partialsDir = get_stylesheet_directory()."/".$this->templateDirectory;
-
-            if (!file_exists($this->partialsDir) && !is_dir($this->partialsDir)) {
-                $this->adminError("Your Handlebars directory is not setup correctly or doesn't exist.");
-                return;
-            }
+            $this->adminError("Your Handlebars directory is not setup correctly or doesn't exist.");
+            return;
         }
         $partialsLoader = new FilesystemLoader($this->partialsDir, ["extension" => $this->fileExtension]);
 
@@ -455,8 +444,12 @@ class Site
      * @param array $data
      * @return string
      */
-    public function view(string $fileName, array $data = []) : string
+    public function view(string $fileName, ?array $data = []) : string
     {
+        if (is_null($data) && ($this->config["debug"] === true)) {
+            return "<pre>The data for view {$fileName}.{$this->fileExtension} is null.</pre>";
+        }
+
         $filePath = $this->partialsDir."/".$fileName.".".$this->fileExtension;
         if (!file_exists($filePath)) {
             if ($this->config["debug"] === true) {
