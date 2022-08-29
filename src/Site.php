@@ -353,6 +353,13 @@ class Site
                 });
                 continue;
             }
+            if ($key === "svg") {
+                add_filter('upload_mimes', function ($file_types) {
+                    $file_types['svg'] = 'image/svg+xml';
+                    return $file_types;
+                });
+                continue;
+            }
 
             $this->adminError("Couldn't enable feature `$key`");
         }
