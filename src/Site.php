@@ -310,6 +310,30 @@ class Site
                 });
                 continue;
             }
+            if ($key === "gutenberg") {
+                add_filter('use_block_editor_for_post', '__return_false', 10);
+                continue;
+            }
+            if ($key === "customizer") {
+                add_action('init', function () {
+                    add_filter('map_meta_cap', function ($capabilities = [], $c = '', $user_id = 0, $args = []) {
+                        if ($c == 'customize') {
+                            return ['nope'];
+                        }
+                        return $capabilities;
+                    }, 10, 4);
+                }, 10);
+
+                add_action('admin_init', function () {
+                    remove_action('plugins_loaded', '_wp_customize_include', 10);
+                    remove_action('admin_enqueue_scripts', '_wp_customize_loader_settings', 11);
+
+                    add_action('load-customize.php', function () {
+                        wp_die("The customizer is disabled via your current theme configuration.");
+                    });
+                }, 10);
+                continue;
+            }
         }
     }
 
