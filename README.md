@@ -1,7 +1,7 @@
 <p align="center">
-<img src="https://better-wordpress.ofco.cloud/images/branding/horizontal-logo.png" alt="ofc-logo" style="max-width:500px;" />
+<img src="/logo.png" alt="ofc-logo" style="max-width:500px;" />
 </p>
-A suite of utilities to aide in the development of WordPress themes and make the experience less painful.
+A suite of utilities to deliver a faster and more consistent WordPress theme development experience.
 <br><br>
 
 [![Latest Stable Version](https://poser.pugx.org/open-function-computers-llc/better-wordpress/v/stable.svg)](https://packagist.org/packages/open-function-computers-llc/better-wordpress) [![Downloads](https://poser.pugx.org/open-function-computers-llc/better-wordpress/d/total.svg)](https://packagist.org/packages/open-function-computers-llc/better-wordpress)<br>
@@ -11,11 +11,11 @@ A suite of utilities to aide in the development of WordPress themes and make the
 
 ## About
 
-The purpose of this package is to enable developers to use the familiar model-view-controller pattern in the creation of WordPress themes. This is accomplished by keeping HTML and PHP code as seperated as possible and adding convenient methods to organize data before it’s sent to the view controllers. Querying for posts, rendering menus, handling taxonomies and all the other essential parts of developing a WordPress theme are now easier than ever with __better-wordpess__.
+The purpose of this package is to enable developers to use the familiar model-view-controller pattern in the creation of WordPress themes. This is accomplished by keeping HTML and PHP code as seperated as possible and adding convenient methods to organize data before it’s sent to the view controllers. Querying for posts, rendering menus, handling taxonomies and all the other essential parts of developing a WordPress theme are now easier than ever with the __RAD Theme Engine__.
 
 
 ## Quick Start
-Inside of your site's `wp-content/themes` folder, run the following command to create a new __better-wordpress__ project.
+Inside of your site's `wp-content/themes` folder, run the following command to create a new __Rad Theme Engine__ project.
 
 ```
 composer create-project open-function-computers-llc/wp-theme <theme-name>
@@ -27,7 +27,7 @@ cd <theme-name>
 npm install
 ```
 
-And that's it! Read about advanced installations and asset bundling on [the docs](https://better-wordpress.ofco.cloud/).
+And that's it! Read about advanced installations and asset bundling on [the docs](https://rad.ofco.cloud/).
 
 ## Example Projects
 - [Shirt Store](https://github.com/open-function-computers-llc/better-wp-example-theme) – Demonstrates custom post types, taxonomies, handlebars, and more.
