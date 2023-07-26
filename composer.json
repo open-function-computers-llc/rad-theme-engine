@@ -1,5 +1,5 @@
 {
-    "name": "open-function-computers-llc/better-wordpress",
+    "name": "open-function-computers-llc/rad-theme-engine",
     "description": "A suite of classes to make WordPress theme development cleaner",
     "require": {
         "php": ">=7.4",
