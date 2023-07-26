@@ -4,9 +4,9 @@
 A suite of utilities to deliver a faster and more consistent WordPress theme development experience.
 <br><br>
 
-[![Latest Stable Version](https://poser.pugx.org/open-function-computers-llc/better-wordpress/v/stable.svg)](https://packagist.org/packages/open-function-computers-llc/better-wordpress) [![Downloads](https://poser.pugx.org/open-function-computers-llc/better-wordpress/d/total.svg)](https://packagist.org/packages/open-function-computers-llc/better-wordpress)<br>
-📦 &nbsp;[View on Packagist](https://packagist.org/packages/open-function-computers-llc/better-wordpress) <br>
-📃 &nbsp;[Read the Docs](https://better-wordpress.ofco.cloud/)
+[![Latest Stable Version](https://poser.pugx.org/open-function-computers-llc/rad-theme-engine/v/stable.svg)](https://packagist.org/packages/open-function-computers-llc/rad-theme-engine) [![Downloads](https://poser.pugx.org/open-function-computers-llc/rad-theme-engine/d/total.svg)](https://packagist.org/packages/open-function-computers-llc/rad-theme-engine)<br>
+📦 &nbsp;[View on Packagist](https://packagist.org/packages/open-function-computers-llc/rad-theme-engine) <br>
+📃 &nbsp;[Read the Docs](https://rad-theme-engine.ofco.cloud/)
 <br>
 
 ## About
@@ -37,4 +37,4 @@ And that's it! Read about advanced installations and asset bundling on [the docs
 - Escher Wright-Dykhouse – [@escherwd](https://github.com/escherwd)
 
 ## License
-Licensed under the MIT license, see [LICENSE](https://github.com/open-function-computers-llc/better-wordpress/blob/main/LICENSE)
+Licensed under the MIT license, see [LICENSE](https://github.com/open-function-computers-llc/rad-theme-engine/blob/main/LICENSE)
