@@ -4,9 +4,9 @@
 A suite of utilities to deliver a faster and more consistent WordPress theme development experience.
 <br><br>
 
-[![Latest Stable Version](https://poser.pugx.org/open-function-computers-llc/better-wordpress/v/stable.svg)](https://packagist.org/packages/open-function-computers-llc/better-wordpress) [![Downloads](https://poser.pugx.org/open-function-computers-llc/better-wordpress/d/total.svg)](https://packagist.org/packages/open-function-computers-llc/better-wordpress)<br>
-📦 &nbsp;[View on Packagist](https://packagist.org/packages/open-function-computers-llc/better-wordpress) <br>
-📃 &nbsp;[Read the Docs](https://better-wordpress.ofco.cloud/)
+[![Latest Stable Version](https://poser.pugx.org/open-function-computers-llc/rad-theme-engine/v/stable.svg)](https://packagist.org/packages/open-function-computers-llc/rad-theme-engine) [![Downloads](https://poser.pugx.org/open-function-computers-llc/rad-theme-engine/d/total.svg)](https://packagist.org/packages/open-function-computers-llc/rad-theme-engine)<br>
+📦 &nbsp;[View on Packagist](https://packagist.org/packages/open-function-computers-llc/rad-theme-engine) <br>
+📃 &nbsp;[Read the Docs](https://rad-theme-engine.ofco.cloud/)
 <br>
 
 ## About
@@ -27,14 +27,14 @@ cd <theme-name>
 npm install
 ```
 
-And that's it! Read about advanced installations and asset bundling on [the docs](https://rad.ofco.cloud/).
+And that's it! Read about advanced installations and asset bundling on [the docs](https://rad-theme-engine.ofco.cloud/).
 
 ## Example Projects
-- [Shirt Store](https://github.com/open-function-computers-llc/better-wp-example-theme) – Demonstrates custom post types, taxonomies, handlebars, and more.
+- [Shirt Store](https://github.com/open-function-computers-llc/rad-theme-engine-example-theme) – Demonstrates custom post types, taxonomies, handlebars, and more.
 
 ## Authors
 - Kurtis Holsapple – [@lapubell](https://github.com/lapubell)
 - Escher Wright-Dykhouse – [@escherwd](https://github.com/escherwd)
 
 ## License
-Licensed under the MIT license, see [LICENSE](https://github.com/open-function-computers-llc/better-wordpress/blob/main/LICENSE)
+Licensed under the MIT license, see [LICENSE](https://github.com/open-function-computers-llc/rad-theme-engine/blob/main/LICENSE)
