@@ -27,10 +27,10 @@ cd <theme-name>
 npm install
 ```
 
-And that's it! Read about advanced installations and asset bundling on [the docs](https://rad.ofco.cloud/).
+And that's it! Read about advanced installations and asset bundling on [the docs](https://rad-theme-engine.ofco.cloud/).
 
 ## Example Projects
-- [Shirt Store](https://github.com/open-function-computers-llc/better-wp-example-theme) – Demonstrates custom post types, taxonomies, handlebars, and more.
+- [Shirt Store](https://github.com/open-function-computers-llc/rad-theme-engine-example-theme) – Demonstrates custom post types, taxonomies, handlebars, and more.
 
 ## Authors
 - Kurtis Holsapple – [@lapubell](https://github.com/lapubell)
