@@ -35,6 +35,7 @@ And that's it! Read about advanced installations and asset bundling on [the docs
 ## Authors
 - Kurtis Holsapple – [@lapubell](https://github.com/lapubell)
 - Escher Wright-Dykhouse – [@escherwd](https://github.com/escherwd)
+- Gabriel Johnson - [@gabriel-johnson](https://github.com/gabriel-johnson)
 
 ## License
 Licensed under the MIT license, see [LICENSE](https://github.com/open-function-computers-llc/rad-theme-engine/blob/main/LICENSE)

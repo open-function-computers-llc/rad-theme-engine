@@ -15,13 +15,12 @@ class Site
     private $partialsDir;
     private $fileExtension;
     private $templateDirectory;
+    public $cptSlugs = [];
 
     public function __construct($config = [])
     {
         if ($config == [] && file_exists(TEMPLATEPATH . "/config.php")) {
             $config = include(TEMPLATEPATH . "/config.php");
-        } elseif ($config == [] && file_exists(get_stylesheet_directory() . "/config.php")) {
-            $config = include(get_stylesheet_directory() . "/config.php");
         }
 
         $this->config = $config;
@@ -55,11 +54,58 @@ class Site
         // register custom post types
         $this->registerCPTs();
 
+        // add custom shortcodes
+        $this->registerShortcodes();
+
         // add mix static assets
         $this->includeManifestFiles();
 
         // register ACF options pages
         $this->addOptionsPages();
+
+        // register custom fields that aren't through ACF
+        $this->processCustomFields();
+
+        // register any ajax callbacks
+        $this->processAdminAJAX();
+        $this->processGuestAJAX();
+    }
+
+    private function processGuestAJAX()
+    {
+        if (!isset($this->config["guest-ajax"])) {
+            return;
+        }
+        if (!is_array($this->config["guest-ajax"])) {
+            return;
+        }
+        foreach ($this->config["guest-ajax"] as $hook => $callback) {
+            // guest ajax methos work both for guests and authed users
+            add_action("wp_ajax_nopriv_$hook", function () use ($callback) {
+                echo json_encode($callback());
+                wp_die();
+            });
+            add_action("wp_ajax_$hook", function () use ($callback) {
+                echo json_encode($callback());
+                wp_die();
+            });
+        }
+    }
+
+    private function processAdminAJAX()
+    {
+        if (!isset($this->config["admin-ajax"])) {
+            return;
+        }
+        if (!is_array($this->config["admin-ajax"])) {
+            return;
+        }
+        foreach ($this->config["admin-ajax"] as $hook => $callback) {
+            add_action("wp_ajax_$hook", function () use ($callback) {
+                echo json_encode($callback());
+                wp_die();
+            });
+        }
     }
 
     private function addEditorStyles()
@@ -215,19 +261,41 @@ class Site
             $extension = end(explode(".", $file));
             $tag = $this->stringify($file);
             if ($extension === "js") {
-                add_action('wp_enqueue_scripts', function () use ($file, $version, $tag) {
-                    wp_register_script($tag, get_template_directory_uri() . '/dist/' . $version, [], '', false);
+                add_action('wp_enqueue_scripts', function () use ($version, $tag) {
+                    wp_register_script($tag, get_template_directory_uri() . '/dist' . $version, [], '', true);
                     wp_enqueue_script($tag);
                 });
                 continue;
             }
 
-            if ($extension === "css") {
+            if ($extension === "css" && $file != "/inline.css") {
                 add_action('wp_enqueue_scripts', function () use ($version, $tag) {
-                    wp_enqueue_style($tag, get_template_directory_uri() . '/dist/' . $version);
+                    wp_enqueue_style($tag, get_template_directory_uri() . '/dist' . $version);
                 });
                 continue;
             }
+
+            if ($file == "/inline.css") {
+                add_action('wp_head', function () use ($file) {
+                    $css = file_get_contents(get_template_directory() . "/dist" . $file);
+                    echo "<style>".$css."</style>";
+                });
+            }
+        }
+    }
+
+    private function registerShortcodes()
+    {
+        if (!array_key_exists('shortcodes', $this->config)) {
+            return;
+        }
+
+        if (!is_array($this->config["shortcodes"])) {
+            return;
+        }
+
+        foreach ($this->config["shortcodes"] as $name => $callable) {
+            add_shortcode($name, $callable);
         }
     }
 
@@ -243,8 +311,13 @@ class Site
                 $this->adminError("To register a new custom post type, you must set the `slug` key.");
                 continue;
             }
+
+            // for convenience access
+            $this->cptSlugs[] = $cpt["slug"];
+
             $options = $cpt['options'] ?? [];
             $names = $this->generateLabels($cpt['slug']);
+
             $newCpt = new PostType($cpt['slug'], $options, $names);
 
             if (isset($cpt['icon'])) {
@@ -275,15 +348,29 @@ class Site
                     $this->adminError("You can't register options pages without the Pro version of Advanced Custom Fields.");
                     continue;
                 }
-                foreach ($cpt["options-pages"] as $optionsPageTitle) {
-                    acf_add_options_page([
-                        "page_title" => $optionsPageTitle,
-                        "menu_title" => $optionsPageTitle,
-                        "menu_slug" => $this->stringify($optionsPageTitle),
-                        'capability' => 'edit_posts',
-                        "position" => 100,
-                        "parent_slug" => "edit.php?post_type=" . $cpt["slug"]
-                    ]);
+                foreach ($cpt["options-pages"] as $optionsPage) {
+                    if (is_string($optionsPage)) {
+                        acf_add_options_page([
+                            "page_title" => $optionsPage,
+                            "menu_title" => $optionsPage,
+                            "menu_slug" => $this->stringify($optionsPage),
+                            'capability' => 'edit_posts',
+                            "position" => 100,
+                            "parent_slug" => "edit.php?post_type=" . $cpt["slug"]
+                        ]);
+                        continue;
+                    }
+
+                    if (is_array($optionsPage) && isset($optionsPage["name"]) && isset($optionsPage["parent_slug"])) {
+                        acf_add_options_page([
+                            "page_title" => $optionsPage["name"],
+                            "menu_title" => $optionsPage["name"],
+                            "menu_slug" => $this->stringify($optionsPage["name"]),
+                            'capability' => 'edit_posts',
+                            "position" => 100,
+                            "parent_slug" => $optionsPage["parent_slug"],
+                        ]);
+                    }
                 }
             }
         }
@@ -304,10 +391,6 @@ class Site
         foreach ($keys as $key) {
             if ($key === "editor") {
                 define('DISALLOW_FILE_EDIT', true);
-                add_action('admin_init', function () {
-                    remove_submenu_page('plugins.php', 'plugin-editor.php');
-                    remove_submenu_page('themes.php', 'theme-editor.php');
-                });
                 continue;
             }
             if ($key === "gutenberg") {
@@ -460,6 +543,22 @@ class Site
             "enableDataVariables" => true,
         ]);
 
+        // built in helpers
+        $helpers = [
+            "wp-header" => \ofc\RadThemeEngine::wpHeader(),
+            "wp-footer" => \ofc\RadThemeEngine::wpFooter(),
+            "wp-title" => \ofc\RadThemeEngine::wpTitle(),
+            "body-classes" => \ofc\RadThemeEngine::bodyClasses(),
+            "json-encode" => \ofc\RadThemeEngine::jsonEncode(),
+            "json-access" => \ofc\RadThemeEngine::jsonAccess(),
+            "flex" => \ofc\RadThemeEngine::processFlex(),
+            "nl2br" => \ofc\RadThemeEngine::nl2br(),
+        ];
+        foreach ($helpers as $name => $callback) {
+            $this->hb->addHelper($name, $callback);
+        }
+
+        // additional helpers defined in the config file
         if (isset($this->config["handlebars"]["additional-helpers"])) {
             foreach ($this->config["handlebars"]["additional-helpers"] as $name => $callback) {
                 $this->hb->addHelper($name, $callback);
@@ -488,12 +587,8 @@ class Site
      * @param array $data
      * @return string
      */
-    public function view(string $fileName, ?array $data = []) : string
+    public function view(string $fileName, array $data = []) : string
     {
-        if (is_null($data) && ($this->config["debug"] === true)) {
-            return "<pre>The data for view {$fileName}.{$this->fileExtension} is null.</pre>";
-        }
-
         $filePath = $this->partialsDir."/".$fileName.".".$this->fileExtension;
         if (!file_exists($filePath)) {
             if ($this->config["debug"] === true) {
@@ -504,6 +599,27 @@ class Site
             return "";
         }
         return $this->hb->render($fileName, $data);
+    }
+
+    /**
+     * view
+     * Invoke handlebar rendering engine for a given template file and data array
+     *
+     * @param string $fileName
+     * @param array $data
+     * @return string
+     */
+    public function renderTemplate(string $template, array $data = []) : string
+    {
+        $hb = new Handlebars();
+        $hb->addHelper("json-encode", \ofc\RadThemeEngine::jsonEncode());
+        return $hb->render($template, $data);
+    }
+
+    public function getCurrentPost($fields = [])
+    {
+        global $post;
+        return $this->getPost($post, $fields);
     }
 
     public function getPost($idOrPost, $fields = [])
@@ -529,6 +645,7 @@ class Site
         $categories = [];
         $taxonomies = [];
         foreach ($fields as $key) {
+            
             // handle url/permalink
             if ($key === "url" || $key === "permalink") {
                 $output[$key] = get_permalink($p->ID);
@@ -537,19 +654,62 @@ class Site
 
             // handle post content
             if ($key === "content") {
-                $output["content"] = apply_filters('the_content', get_the_content($p->ID));
+                $output[$key] = apply_filters('the_content', get_the_content(null, false, $p->ID));
                 continue;
             }
 
             // handle post excerpt
             if ($key === "excerpt") {
-                $output["excerpt"] = get_the_excerpt($p->ID);
+                $output[$key] = get_the_excerpt($p->ID);
+                continue;
+            }
+
+            // handle adjacent posts
+            if ($key === "nextPost") {
+                $output[$key] = get_next_post();
+                continue;
+            }
+            if ($key === "previousPost") {
+                $output[$key] = get_previous_post();
+                continue;
+            }
+
+            // handle adjacent post attributes
+            if (substr($key, 0, 9) === "nextPost.") {
+                $fields = explode(",", substr($key, 9));
+                $output[substr($key, 0, 8)] = $this->getPost(get_next_post(), $fields);
+                continue;
+            }
+            if (substr($key, 0, 13) === "previousPost.") {
+                $fields = explode(",", substr($key, 13));
+                $output[substr($key, 0, 12)] = $this->getPost(get_previous_post(), $fields);
+                continue;
+            }
+
+            if (substr($key, 0, 7) === "parent.") {
+                if ($p->post_parent == 0) {
+                    $output[substr($key, 0, 6)] = [];
+                    continue;
+                }
+                $fields = explode(",", substr($key, 7));
+                $output[substr($key, 0, 6)] = $this->getPost($p->post_parent, $fields);
                 continue;
             }
 
             // handle meta keys
             if (substr($key, 0, 5) === "meta.") {
                 $output[substr($key, 5)] = get_post_meta($p->ID, substr($key, 5), true);
+                continue;
+            }
+
+            // handle better wordpress fields
+            if (substr($key, 0, 4) === "rad.") {
+                if (substr($key, -5) === "-JSON") {
+                    $key = substr($key, 0, strlen($key) - 5);
+                    $output[substr($key, 4)] = json_decode(get_post_meta($p->ID, str_replace("rad.", "rad_", $key), true));
+                    continue;
+                }
+                $output[substr($key, 4)] = get_post_meta($p->ID, str_replace("rad.", "rad_", $key), true);
                 continue;
             }
 
@@ -605,6 +765,16 @@ class Site
                             continue;
                         }
 
+                        if ($val === "url") {
+                            $taxonomyDTO["url"] = get_term_link($tax);
+                            continue;
+                        }
+
+                        if ($val === "permalink") {
+                            $taxonomyDTO["permalink"] = get_term_link($tax);
+                            continue;
+                        }
+
                         if ($val === "name") {
                             $taxonomyDTO["name"] = $tax->name;
                             continue;
@@ -638,6 +808,10 @@ class Site
             }
             if ($key === "title" || $key === "name") {
                 $output[$key] = $p->post_title;
+                continue;
+            }
+            if (in_array($key, ["published", "publishedat", "publishedon", "published_at", "published_on"])) {
+                $output[$key] = $p->post_date;
                 continue;
             }
             if ($key === "thumbnail") {
@@ -869,6 +1043,54 @@ class Site
         ]);
     }
 
+    public function menuArray($menuLocation)
+    {
+        $locations = get_nav_menu_locations();
+        $output = [];
+        if (!isset($locations[$menuLocation])) {
+            return $output;
+        }
+
+        foreach (wp_get_nav_menu_items($locations[$menuLocation]) as $menuItem) {
+            if ($menuItem->menu_item_parent === "0") {
+                $output[$menuItem->ID] = [
+                    "id" => $menuItem->ID,
+                    "title" => $menuItem->title,
+                    "url" => $menuItem->url,
+                    "hasChildren" => false,
+                    "children" => [],
+                ];
+                continue;
+            }
+            $output = $this->addMenuItemToChildren($output, $menuItem);
+        }
+        return $output;
+    }
+
+    private function addMenuItemToChildren(array $items, $childItem)
+    {
+        foreach ($items as $id => $menuItem) {
+            if ($id == $childItem->menu_item_parent) {
+                $items[$id]["hasChildren"] = true;
+                $items[$id]["children"][$childItem->ID] = [
+                    "id" => $childItem->ID,
+                    "title" => $childItem->title,
+                    "url" => $childItem->url,
+                    "hasChildren" => false,
+                    "children" => [],
+                ];
+                return $items;
+            }
+        }
+
+        foreach ($items as $id => $parent) {
+            foreach ($parent["children"] as $childID => $menuItem) {
+                $items[$id]["children"] = $this->addMenuItemToChildren($parent["children"], $childItem);
+            }
+        }
+        return $items;
+    }
+
     private function stringify(string $thing) : string
     {
         $bad = [" ", "/"];
@@ -886,8 +1108,21 @@ class Site
         return get_template_directory_uri()."/assets/$filename";
     }
 
-    private function generateLabels(string $slug) : array
+    public function getAssetContents(string $filename) : string
     {
+        if (!file_exists(get_template_directory()."/assets/$filename")) {
+            return "Asset doesn't exist: ".get_template_directory()."/assets/$filename";
+        }
+
+        return file_get_contents(get_template_directory()."/assets/$filename");
+    }
+
+    private function generateLabels(string|array $slug) : array
+    {
+        if (is_array($slug)) {
+            return $slug;
+        }
+
         return [
             'name' => $this->humanize($slug, true),
             'singular_name' => $this->humanize($slug, false),
@@ -951,5 +1186,57 @@ class Site
         $output["currentPage"] = $paged;
 
         return $output;
+    }
+
+    private function processCustomFields()
+    {
+        $templateFields = [];
+        $tplFileContents;
+
+        $theme = wp_get_theme();
+        $templates = $theme->get_page_templates();
+        foreach ($templates as $filename => $templateName) {
+            $tplFileContents = file_get_contents(get_theme_file_path($filename));
+            $fields = explode("\$fields", $tplFileContents);
+            if (count($fields) === 0) {
+                continue;
+            }
+            $fields = explode(";", $fields[1]);
+            $fieldArray = eval("use ofc\RadField; return " . preg_replace('/=/', "", $fields[0], 1) . ";");
+            $templateFields = [...$templateFields, ...$fieldArray];
+
+            //add template name to first element of name so we can grab it in Util.php
+            //it will be removed when processing each field
+            array_unshift($templateFields, $templateName);
+        }
+
+
+        // some default admin ajax hooks for field processing
+        $existingCPTSlugs = $this->cptSlugs;
+        add_action('wp_ajax_rad_theme_engine_related', function () use ($existingCPTSlugs) {
+            $args = [
+                "type" => array_merge(["page", "post"], $existingCPTSlugs),
+                "limit" => 5,
+                "order" => "asc",
+                "orderby" => "title",
+                "s" => $_POST["q"] ?? "",
+            ];
+
+            $results = site()->getPosts($args, ["title", "id", "url"]);
+            if (count($results) < 1) {
+                $results = [
+                    [
+                        "title" => "No results",
+                        "id" => 0,
+                        "url" => "#"
+                    ]
+                ];
+            }
+
+            echo json_encode($results);
+            wp_die();
+        });
+
+        Util::processFieldGroup($templateFields);
     }
 }
