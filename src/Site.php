@@ -29,6 +29,11 @@ class Site
 
     private function bootstrap()
     {
+        // wordpress added this style for us, but we don't want it
+        add_action('wp_enqueue_scripts', function () {
+            wp_dequeue_style('classic-theme-styles');
+        }, 20);
+
         // disable various things
         if (isset($this->config["disable"])) {
             $this->disable($this->config["disable"]);
@@ -395,6 +400,33 @@ class Site
             }
             if ($key === "gutenberg") {
                 add_filter('use_block_editor_for_post', '__return_false', 10);
+                add_action('wp_enqueue_scripts', function () {
+                    wp_dequeue_style('wp-block-library');
+                    wp_dequeue_style('wp-block-library-theme');
+                    wp_dequeue_style('wc-blocks-style'); // Remove WooCommerce block CSS
+                    wp_dequeue_style('global-styles');
+                }, 100);
+                continue;
+            }
+            if ($key === "patterns") {
+                add_action('after_setup_theme', function () {
+                    remove_theme_support('core-block-patterns');
+                });
+                add_action('admin_init', function () {
+                    remove_submenu_page('themes.php', 'edit.php?post_type=wp_block');
+                    remove_submenu_page('themes.php', 'site-editor.php?p=/pattern');
+                    remove_submenu_page('themes.php', 'site-editor.php?p=/patterns');
+                });
+                continue;
+            }
+            if ($key === "meta-generator") {
+                remove_action('wp_head', 'wp_generator');
+                add_filter('the_generator', '__return_null');
+                continue;
+            }
+            if ($key === "emojis") {
+                remove_action('wp_head', 'print_emoji_detection_script', 7);
+                remove_action('wp_print_styles', 'print_emoji_styles');
                 continue;
             }
             if ($key === "customizer") {
@@ -644,8 +676,8 @@ class Site
         $output = [];
         $categories = [];
         $taxonomies = [];
+
         foreach ($fields as $key) {
-            
             // handle url/permalink
             if ($key === "url" || $key === "permalink") {
                 $output[$key] = get_permalink($p->ID);
@@ -1198,10 +1230,11 @@ class Site
         foreach ($templates as $filename => $templateName) {
             $tplFileContents = file_get_contents(get_theme_file_path($filename));
             $fields = explode("\$fields", $tplFileContents);
-            if (count($fields) === 0) {
+            if (count($fields) < 2) {
                 continue;
             }
             $fields = explode(";", $fields[1]);
+
             $fieldArray = eval("use ofc\RadField; return " . preg_replace('/=/', "", $fields[0], 1) . ";");
             $templateFields = [...$templateFields, ...$fieldArray];
 
