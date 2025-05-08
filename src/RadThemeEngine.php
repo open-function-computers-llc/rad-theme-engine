@@ -55,14 +55,24 @@ class RadThemeEngine
     {
         return function ($template, $context, $args, $source) {
             $output = "";
-            die(var_dump($context->get($args)));
-            $groups = json_decode($context->get($args));
+
+            if (!is_iterable($context->get($args))) {
+                return "Sorry, the item you passed to the flex helper is not iterable.";
+            }
+
+            $groups = $context->get($args);
             foreach ($groups as $g) {
-                $data = [];
-                foreach ($g->fields as $f) {
-                    $data[$f->name] = $f->value;
+                if (!is_array($g)) {
+                    $output .= "Sorry, one of your items is not compatible with the flex helper. Here is the details:<br /><br />".print_r($g, true);
+                    continue;
                 }
-                $output .= site()->render($g->tpl, $data);
+
+                if (!isset($g["acf_fc_layout"])) {
+                    $output .= "Sorry, one of your items is missing the `acf_fc_layout` key:<br /><br />".print_r($g, true);
+                    continue;
+                }
+
+                $output .= site()->render(site()->getFlexFilePrefix().$g["acf_fc_layout"], $g);
             }
             return $output;
         };
@@ -72,6 +82,20 @@ class RadThemeEngine
     {
         return function ($template, $context, $args, $source) {
             return nl2br($context->get($args));
+        };
+    }
+
+    public static function assetURL()
+    {
+        return function ($template, $context, $args, $source) {
+            return site()->getAssetURL($args);
+        };
+    }
+
+    public static function assetContents()
+    {
+        return function ($template, $context, $args, $source) {
+            return site()->getAssetContents($args);
         };
     }
 

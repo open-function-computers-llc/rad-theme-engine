@@ -17,14 +17,25 @@ class Site
     private $templateDirectory;
     public $cptSlugs = [];
 
-    public function __construct($config = [])
+    // singleton instance goes here
+    private static ?Site $instance = null;
+
+    public static function getInstance($config = []): Site
+    {
+        if (self::$instance === null) {
+            self::$instance = new self($config);
+            self::$instance->bootstrap();
+        }
+        return self::$instance;
+    }
+
+    private function __construct(array $config)
     {
         if ($config == [] && file_exists(TEMPLATEPATH . "/config.php")) {
             $config = include(TEMPLATEPATH . "/config.php");
         }
 
         $this->config = $config;
-        $this->bootstrap();
     }
 
     private function bootstrap()
@@ -33,6 +44,10 @@ class Site
         add_action('wp_enqueue_scripts', function () {
             wp_dequeue_style('classic-theme-styles');
         }, 20);
+
+        if (isset($this->config["excerpt-more-text"])) {
+            add_filter('excerpt_more', fn ($more) => $this->config["excerpt-more-text"]);
+        }
 
         // disable various things
         if (isset($this->config["disable"])) {
@@ -74,6 +89,14 @@ class Site
         // register any ajax callbacks
         $this->processAdminAJAX();
         $this->processGuestAJAX();
+    }
+
+    public function getFlexFilePrefix(): string
+    {
+        if (!isset($this->config["flex-file-prefix"])) {
+            return "";
+        }
+        return $this->config["flex-file-prefix"]."_";
     }
 
     private function processGuestAJAX()
@@ -321,6 +344,9 @@ class Site
             $this->cptSlugs[] = $cpt["slug"];
 
             $options = $cpt['options'] ?? [];
+            if (isset($cpt["archive"]) && $cpt["archive"]) {
+                $options["has_archive"] = Util::slugify($this->humanize($cpt["slug"], true));
+            }
             $names = $this->generateLabels($cpt['slug']);
 
             $newCpt = new PostType($cpt['slug'], $options, $names);
@@ -585,6 +611,9 @@ class Site
             "json-access" => \ofc\RadThemeEngine::jsonAccess(),
             "flex" => \ofc\RadThemeEngine::processFlex(),
             "nl2br" => \ofc\RadThemeEngine::nl2br(),
+            "assetURL" => \ofc\RadThemeEngine::assetURL(),
+            "assetUrl" => \ofc\RadThemeEngine::assetURL(),
+            "assetContents" => \ofc\RadThemeEngine::assetContents(),
         ];
         foreach ($helpers as $name => $callback) {
             $this->hb->addHelper($name, $callback);
@@ -692,7 +721,7 @@ class Site
 
             // handle post excerpt
             if ($key === "excerpt") {
-                $output[$key] = get_the_excerpt($p->ID);
+                $output[$key] = apply_filters("the_content", get_the_excerpt($p->ID));
                 continue;
             }
 
