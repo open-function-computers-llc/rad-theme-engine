@@ -10,7 +10,11 @@
         "phpunit/phpunit": "^9.5"
     },
     "license": "MIT",
-    "keywords": ["wordpress", "handlebars", "theme"],
+    "keywords": [
+        "wordpress",
+        "handlebars",
+        "theme"
+    ],
     "minimum-stability": "stable",
     "autoload": {
         "psr-4": {
@@ -19,5 +23,8 @@
     },
     "scripts": {
         "post-create-project-cmd": "ofc\\RadThemeEngine::setup"
-    }
+    },
+    "bin": [
+        "bin/getIcon"
+    ]
 }

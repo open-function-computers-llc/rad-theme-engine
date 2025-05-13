@@ -1,0 +1,20 @@
+#!/usr/bin/env php
+<?php
+
+require __DIR__ . "/../vendor/autoload.php";
+
+use ofc\IconGetter;
+
+if ($argc !== 2) {
+    fwrite(STDERR, "Usage: getIcon <icon-name>\n");
+    exit(1);
+}
+
+$icon = trim(strtolower($argv[1]));
+
+try {
+    IconGetter::get($icon);
+} catch (Exception $e) {
+    fwrite(STDERR, "Error: ".$e->getMessage().PHP_EOL);
+    exit(1);
+}
