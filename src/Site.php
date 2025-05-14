@@ -40,6 +40,8 @@ class Site
 
     private function bootstrap()
     {
+        $this->checkfavicons();
+
         // wordpress added this style for us, but we don't want it
         add_action('wp_enqueue_scripts', function () {
             wp_dequeue_style('classic-theme-styles');
@@ -541,6 +543,14 @@ class Site
             add_filter('body_class', function ($classes) use ($guestClass) {
                 return in_array('logged-in', $classes) ? $classes : [$guestClass, ...$classes];
             });
+        }
+
+        // change excerpt langth
+        if (array_key_exists("excerpt-length", $this->config)) {
+            add_filter("excerpt_length", fn () => (int) $this->config["excerpt-length"], 999);
+        }
+        if (array_key_exists("excerpt_length", $this->config)) {
+            add_filter("excerpt_length", fn () => (int) $this->config["excerpt_length"], 999);
         }
     }
 
@@ -1300,5 +1310,42 @@ class Site
         });
 
         Util::processFieldGroup($templateFields);
+    }
+
+    private function checkfavicons()
+    {
+        if (!is_dir(get_template_directory() . "/assets")) {
+            return;
+        }
+
+        if (file_exists(get_template_directory() . "/assets/favicon.ico")) {
+            add_action('wp_head', function () {
+                echo "<link rel='icon' type='image/x-icon' href='".get_template_directory_uri()."/assets/favicon.ico'>".PHP_EOL;
+            });
+        }
+
+        if (file_exists(get_template_directory() . "/assets/favicon-16x16.png")) {
+            add_action('wp_head', function () {
+                echo "<link rel='icon' type='image/png' href='".get_template_directory_uri()."/assets/favicon-16x16.png'>".PHP_EOL;
+            });
+        }
+
+        if (file_exists(get_template_directory() . "/assets/favicon-32x32.png")) {
+            add_action('wp_head', function () {
+                echo "<link rel='icon' type='image/png' href='".get_template_directory_uri()."/assets/favicon-32x32.png'>".PHP_EOL;
+            });
+        }
+
+        if (file_exists(get_template_directory() . "/assets/apple-touch-icon.png")) {
+            add_action('wp_head', function () {
+                echo "<link rel='apple-touch-icon' type='image/png' href='".get_template_directory_uri()."/assets/apple-touch-icon.png'>".PHP_EOL;
+            });
+        }
+
+        if (file_exists(get_template_directory() . "/assets/site.webmanifest")) {
+            add_action('wp_head', function () {
+                echo "<link rel='manifest' href='".get_template_directory_uri()."/assets/site.webmanifest'>".PHP_EOL;
+            });
+        }
     }
 }
