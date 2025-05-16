@@ -41,7 +41,6 @@ class Util
 
     public static function processFieldGroup($fieldGroup)
     {
-        
         add_action('admin_head-post.php', function () use ($fieldGroup) {
             global $post;
             if ($fieldGroup) {
@@ -54,6 +53,10 @@ class Util
         });
 
         add_action('add_meta_boxes', function () use ($fieldGroup) {
+            if (count($fieldGroup) < 1) {
+                return;
+            }
+
             $name = $fieldGroup[0];
             array_shift($fieldGroup);
             foreach ($fieldGroup as $group) {
