@@ -662,7 +662,7 @@ class Site
     {
         $filePath = $this->partialsDir."/".$fileName.".".$this->fileExtension;
         if (!file_exists($filePath)) {
-            if ($this->config["debug"] === true) {
+            if (isset($this->config["debug"]) && $this->config["debug"] === true) {
                 return "<pre>View {$fileName}.{$this->fileExtension} does not exist.\nData:\n"
                     .print_r($data, true)
                     ."</pre>";
