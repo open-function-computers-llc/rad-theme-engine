@@ -89,6 +89,9 @@ class Util
         });
 
         add_action('save_post', function ($post_id) use ($fieldGroup) {
+            if (!isset($fieldGroup['fields'])) {
+                return;
+            }
             foreach ($fieldGroup['fields'] as $field) {
                 if (!isset($_POST['rad_'.$field['name']])) {
                     continue;
