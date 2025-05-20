@@ -31,8 +31,8 @@ class Site
 
     private function __construct(array $config)
     {
-        if ($config == [] && file_exists(TEMPLATEPATH . "/config.php")) {
-            $config = include(TEMPLATEPATH . "/config.php");
+        if ($config == [] && file_exists(get_template_directory() . "/config.php")) {
+            $config = include(get_template_directory() . "/config.php");
         }
 
         $this->config = $config;
@@ -75,6 +75,9 @@ class Site
 
         // register custom post types
         $this->registerCPTs();
+
+        // register custom hook callbacks
+        $this->processHooks();
 
         // add custom shortcodes
         $this->registerShortcodes();
@@ -381,6 +384,9 @@ class Site
                     $this->adminError("You can't register options pages without the Pro version of Advanced Custom Fields.");
                     continue;
                 }
+                if (is_string($cpt["options-pages"])) {
+                    $cpt["options-pages"] = [$cpt["options-pages"]];
+                }
                 foreach ($cpt["options-pages"] as $optionsPage) {
                     if (is_string($optionsPage)) {
                         acf_add_options_page([
@@ -437,9 +443,7 @@ class Site
                 continue;
             }
             if ($key === "patterns") {
-                add_action('after_setup_theme', function () {
-                    remove_theme_support('core-block-patterns');
-                });
+                remove_theme_support('core-block-patterns');
                 add_action('admin_init', function () {
                     remove_submenu_page('themes.php', 'edit.php?post_type=wp_block');
                     remove_submenu_page('themes.php', 'site-editor.php?p=/pattern');
@@ -455,6 +459,29 @@ class Site
             if ($key === "emojis") {
                 remove_action('wp_head', 'print_emoji_detection_script', 7);
                 remove_action('wp_print_styles', 'print_emoji_styles');
+                continue;
+            }
+            if (substr($key, 0, 12) === "woocommerce." && class_exists('WooCommerce')) {
+                $key = str_replace("woocommerce.", "", $key);
+
+                if ($key === "breadcrumb") {
+                    add_action('init', fn () => remove_action('woocommerce_before_main_content', 'woocommerce_breadcrumb', 20));
+                    continue;
+                }
+                if ($key === "sidebar") {
+                    add_action('init', fn () => remove_action('woocommerce_sidebar', 'woocommerce_get_sidebar', 10));
+                    continue;
+                }
+                if ($key === "result_count") {
+                    add_action('init', fn () => remove_action('woocommerce_before_shop_loop', 'woocommerce_result_count', 20));
+                    add_action('init', fn () => remove_action('woocommerce_before_shop_loop', 'woocommerce_catalog_ordering', 30));
+                    continue;
+                }
+                if ($key === "page_title") {
+                    add_action('init', fn () => add_filter('woocommerce_show_page_title', '__return_false'));
+                    continue;
+                }
+
                 continue;
             }
             if ($key === "customizer") {
@@ -527,6 +554,10 @@ class Site
                 });
                 continue;
             }
+            if ($key === "woocommerce") {
+                add_theme_support('woocommerce');
+                continue;
+            }
 
             $this->adminError("Couldn't enable feature `$key`");
         }
@@ -566,7 +597,7 @@ class Site
         }
 
         $menus = $this->config["menu-locations"];
-        add_action('after_setup_theme', function () use ($menus) {
+        add_action('init', function () use ($menus) {
             register_nav_menus($menus);
         });
     }
@@ -867,6 +898,39 @@ class Site
                         }
                     }
                     $output[$taxonomyKey][] = $taxonomyDTO;
+                }
+                continue;
+            }
+
+            // woocommerce
+            if (substr($key, 0, 12) === "woocommerce.") {
+                $product = wc_get_product($p->ID);
+
+                // reset key
+                $key = str_replace("woocommerce.", "", $key);
+
+                // check if we're diving into the attributes
+                if (substr($key, 0, 10) === "attribute.") {
+                    $key = str_replace("attribute.", "", $key);
+                    $output[$key] = $product->get_attribute($key);
+                    continue;
+                }
+
+                if ($key === "price") {
+                    $output[$key] = $product->get_price();
+                    continue;
+                }
+                if ($key === "attributes") {
+                    $output[$key] = $product->get_attributes();
+                    continue;
+                }
+                if ($key === "sku") {
+                    $output[$key] = $product->get_sku();
+                    continue;
+                }
+                if ($key === "cart_url" || $key === "cartUrl") {
+                    $output[$key] = $product->add_to_cart_url();
+                    continue;
                 }
                 continue;
             }
@@ -1346,6 +1410,22 @@ class Site
             add_action('wp_head', function () {
                 echo "<link rel='manifest' href='".get_template_directory_uri()."/assets/site.webmanifest'>".PHP_EOL;
             });
+        }
+    }
+
+    private function processHooks()
+    {
+        if (!isset($this->config["hooks"]) || !is_array($this->config["hooks"])) {
+            return;
+        }
+
+        $defaultPriorities = [
+            'woocommerce_before_main_content' => 5,
+            'woocommerce_after_main_content' => 50,
+        ];
+        foreach ($this->config["hooks"] as $hookName => $callback) {
+            $priority = $defaultPriorities[$hookName] ?? 99;
+            add_action($hookName, $callback, $priority);
         }
     }
 }
