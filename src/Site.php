@@ -1428,4 +1428,30 @@ class Site
             add_action($hookName, $callback, $priority);
         }
     }
+
+    /**
+     * parseArgs
+     * Used in conjuction with the handlebars helpers to grab all the different args
+     *
+     * @param string $args
+     * @return array
+     */
+    public function parseArgs(string $args): array
+    {
+        $parsed = [];
+
+        // Match key="value", key='value', or key=value
+        preg_match_all('/(\w+)=(".*?"|\'.*?\'|\S+)/', $args, $matches, PREG_SET_ORDER);
+
+        foreach ($matches as $match) {
+            $key = $match[1];
+            $value = $match[2];
+
+            // Strip quotes if present
+            $value = trim($value, "\"'");
+            $parsed[$key] = $value;
+        }
+
+        return $parsed;
+    }
 }
