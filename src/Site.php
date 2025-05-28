@@ -432,6 +432,10 @@ class Site
                 define('DISALLOW_FILE_EDIT', true);
                 continue;
             }
+            if ($key === "revisions") {
+                add_filter('wp_revisions_to_keep', fn ($num, $post) => 0, 10, 2);
+                continue;
+            }
             if ($key === "gutenberg") {
                 add_filter('use_block_editor_for_post', '__return_false', 10);
                 add_action('wp_enqueue_scripts', function () {
@@ -479,6 +483,10 @@ class Site
                 }
                 if ($key === "page_title") {
                     add_action('init', fn () => add_filter('woocommerce_show_page_title', '__return_false'));
+                    continue;
+                }
+                if ($key === "archive_description") {
+                    add_action('init', fn () => remove_action('woocommerce_archive_description', 'woocommerce_taxonomy_archive_description', 10));
                     continue;
                 }
 
@@ -539,6 +547,11 @@ class Site
             }
             if ($key === "menus") {
                 add_theme_support('menus');
+                continue;
+            }
+            if ($key === "excerpts" || $key === "excerpt") {
+                add_action('init', fn () => add_post_type_support('page', ['excerpt']));
+                add_action('init', fn () => add_post_type_support('post', ['excerpt']));
                 continue;
             }
             if ($key === "styleselect") {
@@ -1012,6 +1025,19 @@ class Site
         return $output;
     }
 
+    public function getQueriedObject($term = null, $fields = [])
+    {
+        if (is_null($term)) {
+            $term = get_queried_object();
+        }
+
+        if ($fields === []) {
+            return $term;
+        }
+
+        return $this->getFieldsForTerm($fields, $term);
+    }
+
     public function getTerm($slug, $fields = [])
     {
         $args = [
@@ -1027,28 +1053,47 @@ class Site
 
         $output = [];
         foreach ($results as $term) {
-            $append = [];
-            foreach ($fields as $key) {
-                $oldKey = $key;
-                if ($key == "id") {
-                    $key = "term_id";
-                }
-                if ($key == "title") {
-                    $key = "name";
-                }
-
-                if ($oldKey != $key) {
-                    $append[$oldKey] = $term->$key;
-                    continue;
-                }
-
-                if ($key === "url" || $key === "permalink") {
-                    $append[$key] = get_term_link($term);
-                    continue;
-                }
-                $append[$key] = $term->$key;
-            }
+            $append = $this->getFieldsForTerm($fields, $term);
             $output[] = $append;
+        }
+        return $output;
+    }
+
+    private function getFieldsForTerm(array $fields, $term)
+    {
+        $output = [];
+        foreach ($fields as $key) {
+            if ($key === "id" || $key === "ID" || $key === "term_id") {
+                $output[$key] = $term->term_id;
+                continue;
+            }
+
+            if ($key === "title" || $key === "name") {
+                $output[$key] = $term->name;
+                continue;
+            }
+
+            if ($key === "url" || $key === "permalink") {
+                $output[$key] = get_term_link($term);
+                continue;
+            }
+
+            if ($key === "thumbnail") {
+                $thumbnailID = get_term_meta($term->term_id, 'thumbnail_id', true);
+                if (!$thumbnailID) {
+                    $output[$key] = "";
+                    continue;
+                }
+                $output[$key] = wp_get_attachment_url($thumbnailID);
+                continue;
+            }
+
+            if (substr($key, 0, 4) === "acf.") {
+                $key = str_replace("acf.", "", $key);
+                $output[$key] = get_field($key, $term->taxonomy . "_" . $term->term_id);
+                continue;
+            }
+            $output[$key] = $term->$key;
         }
         return $output;
     }
