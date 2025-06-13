@@ -1,0 +1,49 @@
+#!/usr/bin/env php
+<?php
+
+$autoloadPaths = [
+    __DIR__ . '/../../../autoload.php', // typical path when symlinked in vendor/bin
+    __DIR__ . '/../vendor/autoload.php', // fallback if run directly from source
+];
+
+$found = false;
+foreach ($autoloadPaths as $path) {
+    if (file_exists($path)) {
+        require $path;
+        $found = true;
+        break;
+    }
+}
+
+if (!$found) {
+    fwrite(STDERR, "Could not locate Composer autoloader.\n");
+    exit(1);
+}
+
+if ($argc < 2) {
+    fwrite(STDERR, "Usage: rad <command> [options]\n");
+    exit(1);
+}
+
+$command = strtolower(trim($argv[1]));
+$arguments = array_slice($argv, 2);
+
+$availableCommands = [
+    "get-icon" => \ofc\Commands\GetIconCommand::class,
+
+    // TODO: additional commands go below
+    // "swap-library" => \ofc\Commands\LibrarySwap::class,
+];
+
+if (!isset($availableCommands[$command])) {
+    fwrite(STDERR, "Error: Unknown command '$command'\n");
+    exit(1);
+}
+
+// If the user requested help
+if (in_array('--help', $arguments)) {
+    echo $availableCommands[$command]::getHelp().PHP_EOL.PHP_EOL;
+    exit(0);
+}
+
+$availableCommands[$command]::run($arguments);
