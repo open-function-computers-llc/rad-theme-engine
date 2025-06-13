@@ -2,6 +2,7 @@
 
 namespace ofc;
 
+use Exception;
 use PostTypes\PostType;
 use Handlebars\Handlebars;
 use Handlebars\Loader\FilesystemLoader;
@@ -77,7 +78,8 @@ class Site
         $this->registerCPTs();
 
         // register custom hook callbacks
-        $this->processHooks();
+        $this->processActions();
+        $this->processFilters(); // TODO
 
         // add custom shortcodes
         $this->registerShortcodes();
@@ -489,6 +491,21 @@ class Site
                     add_action('init', fn () => remove_action('woocommerce_archive_description', 'woocommerce_taxonomy_archive_description', 10));
                     continue;
                 }
+                if ($key === "reviews") {
+                    add_action('init', function () {
+                        remove_post_type_support('product', 'comments');
+                    });
+
+                    add_filter('woocommerce_product_reviews_enabled', '__return_false');
+                    add_filter('comments_array', function ($comments, $post_id) {
+                        if (get_post_type($post_id) === 'product') {
+                            return [];
+                        }
+                        return $comments;
+                    }, 10, 2);
+
+                    continue;
+                }
 
                 continue;
             }
@@ -569,6 +586,9 @@ class Site
             }
             if ($key === "woocommerce") {
                 add_theme_support('woocommerce');
+                add_theme_support('wc-product-gallery-zoom');
+                add_theme_support('wc-product-gallery-lightbox');
+                add_theme_support('wc-product-gallery-slider');
                 continue;
             }
 
@@ -713,7 +733,20 @@ class Site
             }
             return "";
         }
-        return $this->hb->render($fileName, $data);
+
+        try {
+            return $this->hb->render($fileName, $data);
+        } catch (Exception $e) {
+            $template = <<<HTML
+            <div style="padding: 1rem; text-align: center; border: 1px solid #da3636; border-radius: 5px; margin: 1rem;">{{{ message }}}</div>
+            HTML;
+
+            $message = isset($this->config["debug"]) && $this->config["debug"] === true ?
+                "There was an error. Please see the message below:<br /><strong>" . $e->getMessage() ."</strong>":
+                "There was an error rendering this page. Please reach out to the site owner or try again later.";
+
+            return $this->renderTemplate($template, ["message" => $message]);
+        }
     }
 
     /**
@@ -1458,19 +1491,25 @@ class Site
         }
     }
 
-    private function processHooks()
+    private function processActions()
     {
-        if (!isset($this->config["hooks"]) || !is_array($this->config["hooks"])) {
+        if (!isset($this->config["actions"]) || !is_array($this->config["actions"])) {
             return;
         }
 
-        $defaultPriorities = [
-            'woocommerce_before_main_content' => 5,
-            'woocommerce_after_main_content' => 50,
-        ];
-        foreach ($this->config["hooks"] as $hookName => $callback) {
-            $priority = $defaultPriorities[$hookName] ?? 99;
-            add_action($hookName, $callback, $priority);
+        foreach ($this->config["actions"] as $hookName => $callback) {
+            if (is_array($callback) && array_is_list($callback)) {
+                $priority = $callback[1];
+                $callback = $callback[0];
+                add_action($hookName, $callback, $priority);
+                continue;
+            }
+            if (is_array($callback) && isset($callback["hook"]) && isset($callback["callback"])) {
+                add_action($callback["hook"], $callback["callback"], $callback["priority"] ?? 99);
+                continue;
+            }
+
+            add_action($hookName, $callback, 99);
         }
     }
 
