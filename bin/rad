@@ -30,6 +30,7 @@ $arguments = array_slice($argv, 2);
 
 $availableCommands = [
     "get-icon" => \ofc\Commands\GetIconCommand::class,
+    'make:action' => \ofc\Commands\MakeActionCommand::class,
 
     // TODO: additional commands go below
     // "swap-library" => \ofc\Commands\LibrarySwap::class,

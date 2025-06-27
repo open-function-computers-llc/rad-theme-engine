@@ -8,10 +8,9 @@ class GetIconCommand
 {
     public static function run(array $args): void
     {
-        if (count($args) !== 1) {
-            fwrite(STDERR, "Usage: rad get-icon <icon-name>\n");
-            var_dump($args);
-            exit(1);
+        if (!isset($args[0]) || $args[0] === '--help') {
+            echo self::getHelp().PHP_EOL;
+            exit(!isset($args[0]) || $args[0] === '--help'? 0 : 1);
         }
 
         $icon = trim(strtolower($args[0]));

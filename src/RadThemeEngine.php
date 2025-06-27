@@ -85,6 +85,46 @@ class RadThemeEngine
         };
     }
 
+    public static function pagination()
+    {
+        return function ($template, $context, $args, $source) {
+            return site()->renderTemplate(<<<HTML
+                <nav class="pagination-links">
+                    <ul>
+                        {{#if older }}
+                            <li><a href="{{ older }}">Next</a></li>
+                        {{/if}}
+                        {{#if newer }}
+                            <li><a href="{{ newer }}">Previous</a></li>
+                        {{/if}}
+                    </ul>
+                </nav>
+            HTML, site()->getPaginationLinks());
+        };
+    }
+
+    public static function acfOption()
+    {
+        return function ($template, $context, $args, $source) {
+            return get_field($args, "options");
+        };
+    }
+
+    public static function count()
+    {
+        return function ($template, $context, $args, $source) {
+            return count($context->get($args));
+        };
+    }
+
+    public static function queryCount()
+    {
+        global $wp_query;
+        return function ($template, $context, $args, $source) use ($wp_query) {
+            return $wp_query->found_posts;
+        };
+    }
+
     public static function assetURL()
     {
         return function ($template, $context, $args, $source) {

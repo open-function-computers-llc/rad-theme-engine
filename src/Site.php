@@ -688,6 +688,11 @@ class Site
             "assetURL" => \ofc\RadThemeEngine::assetURL(),
             "assetUrl" => \ofc\RadThemeEngine::assetURL(),
             "assetContents" => \ofc\RadThemeEngine::assetContents(),
+            "count" => \ofc\RadThemeEngine::count(),
+            "length" => \ofc\RadThemeEngine::count(),
+            "paginationLinks" => \ofc\RadThemeEngine::pagination(),
+            "queryCount" => \ofc\RadThemeEngine::queryCount(),
+            "acfOption" => \ofc\RadThemeEngine::acfOption(),
         ];
         foreach ($helpers as $name => $callback) {
             $this->hb->addHelper($name, $callback);
@@ -1092,10 +1097,37 @@ class Site
         return $output;
     }
 
+    private function getTermChildren($term, $fields = [])
+    {
+        $args = [
+            'taxonomy' => $term->taxonomy,
+            'parent' => $term->term_id,
+            'hide_empty' => false,
+            'suppress_filter' => true,
+        ];
+        $results = get_terms($args);
+
+        if ($fields == []) {
+            return $results;
+        }
+
+        $output = [];
+        foreach ($results as $term) {
+            $append = $this->getFieldsForTerm($fields, $term);
+            $output[] = $append;
+        }
+        return $output;
+    }
+
     private function getFieldsForTerm(array $fields, $term)
     {
         $output = [];
         foreach ($fields as $key) {
+            if (str_starts_with($key, "children")) {
+                $fields = explode(",", str_replace("children.", "", $key));
+                $output["children"] = site()->getTermChildren($term, $fields);
+                continue;
+            }
             if ($key === "id" || $key === "ID" || $key === "term_id") {
                 $output[$key] = $term->term_id;
                 continue;
@@ -1126,7 +1158,14 @@ class Site
                 $output[$key] = get_field($key, $term->taxonomy . "_" . $term->term_id);
                 continue;
             }
+
+            // try to get the property straight off the object?
             $output[$key] = $term->$key;
+
+            // still nothing? check meta
+            if (is_null($output[$key])) {
+                $output[$key] = get_term_meta($term->term_id, $key, true);
+            }
         }
         return $output;
     }
@@ -1493,23 +1532,30 @@ class Site
 
     private function processActions()
     {
+        ActionsLoader::load();
+
         if (!isset($this->config["actions"]) || !is_array($this->config["actions"])) {
             return;
         }
 
-        foreach ($this->config["actions"] as $hookName => $callback) {
-            if (is_array($callback) && array_is_list($callback)) {
-                $priority = $callback[1];
-                $callback = $callback[0];
+        foreach ($this->config["actions"] as $hookName => $action) {
+            if (is_array($action) && array_is_list($action) && count($action) === 2) {
+                if (!is_numeric($action[1])) {
+                    // invalid priority
+                    continue;
+                }
+                $priority = $action[1];
+                $callback = $action[0];
                 add_action($hookName, $callback, $priority);
                 continue;
             }
-            if (is_array($callback) && isset($callback["hook"]) && isset($callback["callback"])) {
-                add_action($callback["hook"], $callback["callback"], $callback["priority"] ?? 99);
+
+            if (is_array($action) && isset($action["hook"]) && isset($action["callback"])) {
+                add_action($action["hook"], $action["callback"], $action["priority"] ?? 99);
                 continue;
             }
 
-            add_action($hookName, $callback, 99);
+            add_action($hookName, $action, 99);
         }
     }
 
