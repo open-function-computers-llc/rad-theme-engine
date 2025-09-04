@@ -29,7 +29,7 @@ $command = strtolower(trim($argv[1]));
 $arguments = array_slice($argv, 2);
 
 $availableCommands = [
-    "get-icon" => \ofc\Commands\GetIconCommand::class,
+    "get:icon" => \ofc\Commands\GetIconCommand::class,
     'make:action' => \ofc\Commands\MakeActionCommand::class,
 
     // TODO: additional commands go below
