@@ -42,24 +42,24 @@ class GetIconCommand
         }
 
         $source_options = [
-          "-bootstrap" => self::source_urls["bootstrap"],
+          "--bootstrap" => self::source_urls["bootstrap"],
           "-bs" => self::source_urls["bootstrap"],
-          "-heroicons" => self::source_urls["heroicons_20_solid"],
+          "--heroicons" => self::source_urls["heroicons_20_solid"],
           "-hi" => self::source_urls["heroicons_20_solid"],
           "-hi-16" => self::source_urls["heroicons_16_solid"],
           "-hi-24" => self::source_urls["heroicons_24_solid"],
           "-hi-outline" => self::source_urls["heroicons_24_outline"],
-          "-lucide" => self::source_urls["lucide"],
+          "--lucide" => self::source_urls["lucide"],
           "-li" => self::source_urls["lucide"],
-          "-material" => self::source_urls["material"],
+          "--material" => self::source_urls["material"],
           "-md" => self::source_urls["material"],
           "-md-round" => self::source_urls["material_round"],
           "-md-outline" => self::source_urls["material_outline"],
           "-md-sharp" => self::source_urls["material_sharp"],
           "-md-round-outline" => self::source_urls["material_round_outline"],
-          "-emoji" => self::source_urls["noto"],
+          "--emoji" => self::source_urls["noto"],
           "-e" => self::source_urls["noto"],
-          "-flag" => self::source_urls["flag"],
+          "--flag" => self::source_urls["flag"],
           "-f" => self::source_urls["flag"],
         ];
 
@@ -80,19 +80,19 @@ class GetIconCommand
 Usage: rad get:icon [source] <icon-name>
 
 Source:
-  -bootstrap, -bs     Boostrap Icons (Default) - https://icons.getbootstrap.com
-  -heroicons, -hi     Hero Icons 20px - https://heroicons.com
-    -hi-16              Hero Icons 16px
-    -hi-24              Hero Icons 24px
-    -hi-outline         Hero Icons 24px Outline
-  -material, -md      Material Icons - https://fonts.google.com/icons
-    -md-round           Material Icons Rounded
-    -md-outline         Material Icons Outlined
-    -md-sharp           Material Icons Sharp
-    -md-round-outline   Material Icons Round Outlined
-  -lucide, -li        Lucide Icons - https://lucide.dev/icons/
-  -emoji, -e          Google Noto Emojis - https://icones.js.org/collection/noto
-  -flag, -f           Flagpack Flags (Alpha-2 Code) - https://flagpack.xyz/docs/flag-index/
+  -bs, --bootstrap      Boostrap Icons (Default) - https://icons.getbootstrap.com
+  -hi, --heroicons      Hero Icons 20px - https://heroicons.com
+    -hi-16                Hero Icons 16px
+    -hi-24                Hero Icons 24px
+    -hi-outline           Hero Icons 24px Outline
+  -md, --material       Material Icons - https://fonts.google.com/icons
+    -md-round             Material Icons Rounded
+    -md-outline           Material Icons Outlined
+    -md-sharp             Material Icons Sharp
+    -md-round-outline     Material Icons Round Outlined
+  -li, --lucide         Lucide Icons - https://lucide.dev/icons/
+  -e, --emoji           Google Noto Emojis - https://icones.js.org/collection/noto
+  -f, --flag            Flagpack Flags (Alpha-2 Code) - https://flagpack.xyz/docs/flag-index/
 
 Description:
   Download the SVG icon from the specified source and place it in your theme assets folder.
@@ -101,8 +101,8 @@ Description:
 Example:
   rad get:icon phone
   rad get:icon -hi phone
-  rad get:icon -flag uk
-  rad get:icon -emoji thumbs-up
+  rad get:icon --flag uk
+  rad get:icon --emoji thumbs-up
 HELP;
     }
 }
