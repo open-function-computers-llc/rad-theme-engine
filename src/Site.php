@@ -691,6 +691,8 @@ class Site
             "count" => \ofc\RadThemeEngine::count(),
             "length" => \ofc\RadThemeEngine::count(),
             "paginationLinks" => \ofc\RadThemeEngine::pagination(),
+            "paginationCount" => \ofc\RadThemeEngine::paginationCount(),
+            "paginationIndex" => \ofc\RadThemeEngine::paginationIndex(),
             "queryCount" => \ofc\RadThemeEngine::queryCount(),
             "acfOption" => \ofc\RadThemeEngine::acfOption(),
         ];
