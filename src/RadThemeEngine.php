@@ -103,6 +103,25 @@ class RadThemeEngine
         };
     }
 
+    public static function paginationCount()
+    {
+        global $wp_query;
+        return function ($template, $context, $args, $source) use ($wp_query) {
+            return $wp_query->max_num_pages;
+        };
+    }
+
+    public static function paginationIndex()
+    {
+        return function ($template, $context, $args, $source) {
+            $paged = get_query_var('paged');
+            if (!$paged) {
+                $paged = 1;
+            }
+            return $paged;
+        };
+    }
+
     public static function acfOption()
     {
         return function ($template, $context, $args, $source) {

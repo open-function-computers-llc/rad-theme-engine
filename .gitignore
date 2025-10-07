@@ -2,3 +2,5 @@ vendor/
 composer.lock
 .php.result.cache
 .phpunit.result.cache
+
+functions.example.php
