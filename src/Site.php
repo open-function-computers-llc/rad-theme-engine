@@ -90,6 +90,9 @@ class Site
         // add mix static assets
         $this->includeManifestFiles();
 
+        // register site options pages (companion-YAML driven, saved as options)
+        $this->processOptionPages();
+
         // register ACF options pages
         $this->addOptionsPages();
 
