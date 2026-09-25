@@ -67,12 +67,19 @@ class RadThemeEngine
                     continue;
                 }
 
-                if (!isset($g["acf_fc_layout"])) {
-                    $output .= "Sorry, one of your items is missing the `acf_fc_layout` key:<br /><br />".print_r($g, true);
+                // ACF flexible fields carry `acf_fc_layout`; the CompanionFields
+                // flexible type carries `_layout` (the human layout name, which we
+                // slug into the template file name).
+                if (isset($g["acf_fc_layout"])) {
+                    $layout = $g["acf_fc_layout"];
+                } elseif (isset($g["_layout"])) {
+                    $layout = CompanionFields::layoutSlug($g["_layout"]);
+                } else {
+                    $output .= "Sorry, one of your items is missing a layout key (`acf_fc_layout` or `_layout`):<br /><br />".print_r($g, true);
                     continue;
                 }
 
-                $output .= site()->render(site()->getFlexFilePrefix().$g["acf_fc_layout"], $g);
+                $output .= site()->render(site()->getFlexFilePrefix().$layout, $g);
             }
             return $output;
         };
@@ -107,6 +114,41 @@ class RadThemeEngine
     {
         return function ($template, $context, $args, $source) {
             return get_field($args, "options");
+        };
+    }
+
+    /**
+     * Resolve a companion-YAML site option in a template, mirroring acfOption.
+     *
+     *   {{#radOption primary_phone}}                    -> single configured page
+     *   {{#radOption site-settings primary_phone}}      -> explicit page + field
+     *   {{#radOption site-settings}}                    -> whole page as a map
+     *
+     * The first arg is the options page name (as named in config `options-pages`),
+     * the second (optional) is the field name.
+     */
+    public static function radOption()
+    {
+        return function ($template, $context, $args, $source) {
+            $parts = preg_split('/\s+/', trim((string) $args), 2);
+            $first = $parts[0] ?? '';
+
+            if ($first === '') {
+                return '';
+            }
+
+            // Two args: page + field.
+            if (count($parts) === 2) {
+                $value = site()->getOption($parts[0], $parts[1]);
+                return is_string($value) ? $value : json_encode($value);
+            }
+
+            // Single arg: could be "page field" was not given, so treat the one
+            // token as either a field on the (single) configured page, or a page
+            // name (returns the whole page). We can't know both, so resolve as a
+            // field first against every configured page, then as a whole page.
+            $resolved = site()->resolveRadOptionToken($first);
+            return is_string($resolved) ? $resolved : json_encode($resolved);
         };
     }
 

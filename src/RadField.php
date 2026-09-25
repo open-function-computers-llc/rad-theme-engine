@@ -77,8 +77,7 @@ class RadField
         foreach($fields as $field){
             $tpl_fields[] = 'rad.'.$field['name'];
         }
-        
+
         return $tpl_fields;
     }
-
 }

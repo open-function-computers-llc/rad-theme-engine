@@ -383,8 +383,6 @@ class Site
             }
             $names = $this->generateLabels($cpt['slug']);
 
-            // die(var_dump([$names, $options]));
-
             $newCpt = new PostType($cpt['slug'], $options, $names);
 
             if (isset($cpt['icon'])) {
@@ -561,14 +559,39 @@ class Site
         }
     }
 
+    /**
+     * Legacy ACF Pro options pages. The companion-YAML options pages
+     * (see processOptionPages) are now the primary mechanism, so this only runs
+     * as a fallback when none of the requested pages have an options/<name>.yml
+     * file (i.e. the user is relying on ACF for those).
+     */
     private function addOptionsPages()
     {
         if (!array_key_exists('options-pages', $this->config)) {
             return;
         }
 
+        $pages = is_array($this->config["options-pages"])
+            ? $this->config["options-pages"]
+            : [$this->config["options-pages"]];
+
+        // If every requested page has a companion yml, the new system owns them;
+        // don't double-register with ACF.
+        $hasYaml = false;
+        foreach ($pages as $name) {
+            $fileName = preg_replace('/[^a-zA-Z0-9\-_]/', '', (string) $name);
+            if (file_exists(get_template_directory() . '/options/' . $fileName . '.yml')) {
+                $hasYaml = true;
+                break;
+            }
+        }
+        if ($hasYaml) {
+            return;
+        }
+
         if (!function_exists("acf_add_options_page")) {
             $this->adminError("You can't register options pages without the Pro version of Advanced Custom Fields.");
+            return;
         }
 
         $i = 100;
@@ -582,6 +605,26 @@ class Site
             ]);
             $i++;
         }
+    }
+
+    /**
+     * Register site options pages driven by companion-YAML files. Each name in
+     * the `options-pages` config key maps to `options/<name>.yml` in the theme
+     * and becomes a standalone admin menu page; values are stored as site
+     * options (see OptionPages). This is the ACF-free replacement for the
+     * ACF options page flow.
+     */
+    private function processOptionPages()
+    {
+        if (!isset($this->config["options-pages"]) || empty($this->config["options-pages"])) {
+            return;
+        }
+
+        $pages = is_array($this->config["options-pages"])
+            ? $this->config["options-pages"]
+            : [$this->config["options-pages"]];
+
+        OptionPages::boot($pages);
     }
 
     private function enable(array $keys)
@@ -611,6 +654,7 @@ class Site
                     $file_types['svg'] = 'image/svg+xml';
                     return $file_types;
                 });
+
                 add_filter('wp_handle_upload_prefilter', function ($file) {
                     if ($file['type'] !== 'image/svg+xml') {
                         return $file;
@@ -626,6 +670,7 @@ class Site
                     file_put_contents($file['tmp_name'], $clean);
                     return $file;
                 });
+
                 continue;
             }
             if ($key === "woocommerce") {
@@ -737,6 +782,7 @@ class Site
             "paginationLinks" => \ofc\RadThemeEngine::pagination(),
             "queryCount" => \ofc\RadThemeEngine::queryCount(),
             "acfOption" => \ofc\RadThemeEngine::acfOption(),
+            "radOption" => \ofc\RadThemeEngine::radOption(),
         ];
         foreach ($helpers as $name => $callback) {
             $this->hb->addHelper($name, $callback);
@@ -819,6 +865,49 @@ class Site
         return $this->getPost($post, $fields);
     }
 
+    /**
+     * Resolve a site options field (or a whole options page) to its template
+     * value. Options are site-wide, so this is post-agnostic.
+     *
+     * @param string $page  options page slug (as named in config `options-pages`)
+     * @param string|null $field field name; null returns the whole page as a map
+     * @return mixed
+     */
+    public function getOption(string $page, ?string $field = null)
+    {
+        return $field === null
+            ? OptionPages::resolveAll($page)
+            : OptionPages::resolveField($page, $field);
+    }
+
+    /**
+     * Resolve a single option token (as used by the radOption helper when given
+     * one argument). If the token names a configured options page, returns the
+     * whole page as a name=>value map; otherwise searches every configured page
+     * for a field with that name and returns the resolved value.
+     *
+     * @return mixed
+     */
+    public function resolveRadOptionToken(string $token)
+    {
+        // First, is it a whole page?
+        $groups = OptionPages::discover(OptionPages::names());
+        $slug = OptionPages::slugFor($token);
+        if (isset($groups[$slug])) {
+            return OptionPages::resolveAll($slug);
+        }
+
+        // Otherwise, search every page for a field with this name.
+        foreach (array_keys($groups) as $pageSlug) {
+            $all = OptionPages::resolveAll($pageSlug);
+            if (array_key_exists($token, $all)) {
+                return $all[$token];
+            }
+        }
+
+        return '';
+    }
+
     public function getPost($idOrPost, $fields = [])
     {
         if (is_numeric($idOrPost)) {
@@ -899,14 +988,36 @@ class Site
                 continue;
             }
 
-            // handle better wordpress fields
+            // handle site options fields:
+            //   options.<page>.<field>  -> a single resolved field value
+            //   options.<page>          -> the whole page as a name=>value map
+            if (substr($key, 0, 8) === "options.") {
+                $rest = substr($key, 8);
+                $parts = explode(".", $rest, 2);
+                $page = $parts[0];
+                if (count($parts) === 2) {
+                    $output[substr($key, 8)] = OptionPages::resolveField($page, $parts[1]);
+                } else {
+                    $output[substr($key, 8)] = OptionPages::resolveAll($page);
+                }
+                continue;
+            }
+
+            // handle rad fields
             if (substr($key, 0, 4) === "rad.") {
-                if (substr($key, -5) === "-JSON") {
-                    $key = substr($key, 0, strlen($key) - 5);
-                    $output[substr($key, 4)] = json_decode(get_post_meta($p->ID, str_replace("rad.", "rad_", $key), true));
+                $name = str_replace("rad.", "", $key);
+
+                // `rad.<name>-JSON` resolves a field by its companion-yml output
+                // type (media -> url/id/alt/html/array; repeater -> row array).
+                if (substr($name, -5) === "-JSON") {
+                    $name = substr($name, 0, strlen($name) - 5);
+                    $output[$name] = CompanionFields::resolveField($name, $p);
                     continue;
                 }
-                $output[substr($key, 4)] = get_post_meta($p->ID, str_replace("rad.", "rad_", $key), true);
+
+                // Plain `rad.<name>` also resolves media/repeater by their yml
+                // output so the template just gets the value it asked for.
+                $output[$name] = CompanionFields::resolveField($name, $p);
                 continue;
             }
 
@@ -1486,27 +1597,11 @@ class Site
 
     private function processCustomFields()
     {
-        $templateFields = [];
-        $tplFileContents;
-
-        $theme = wp_get_theme();
-        $templates = $theme->get_page_templates();
-        foreach ($templates as $filename => $templateName) {
-            $tplFileContents = file_get_contents(get_theme_file_path($filename));
-            $fields = explode("\$fields", $tplFileContents);
-            if (count($fields) < 2) {
-                continue;
-            }
-            $fields = explode(";", $fields[1]);
-
-            $fieldArray = eval("use ofc\RadField; return " . preg_replace('/=/', "", $fields[0], 1) . ";");
-            $templateFields = [...$templateFields, ...$fieldArray];
-
-            //add template name to first element of name so we can grab it in Util.php
-            //it will be removed when processing each field
-            array_unshift($templateFields, $templateName);
-        }
-
+        // The legacy `$fields` / eval() based field system has been replaced by
+        // the companion-YAML system. Each page template may now have a sibling
+        // .yml file (e.g. tpl-flexible.php -> tpl-flexible.yml) whose `fields:`
+        // block drives an admin meta box. See CompanionFields.
+        CompanionFields::boot();
 
         // some default admin ajax hooks for field processing
         $existingCPTSlugs = $this->cptSlugs;
@@ -1533,8 +1628,6 @@ class Site
             echo json_encode($results);
             wp_die();
         });
-
-        Util::processFieldGroup($templateFields);
     }
 
     private function checkfavicons()
