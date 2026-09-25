@@ -74,6 +74,9 @@ class Site
         // initialize handlebars
         $this->setUpHandlebars();
 
+        // check for email logging
+        $this->setupEmailLogging();
+
         // register custom post types
         $this->registerCPTs();
 
@@ -140,6 +143,29 @@ class Site
                 echo json_encode($callback());
                 wp_die();
             });
+        }
+    }
+
+    private function setupEmailLogging()
+    {
+        if (!isset($this->config["email"]) || !is_array($this->config["email"])) {
+            return;
+        }
+
+        $emailConfig = $this->config["email"];
+        if (isset($emailConfig["log"]) && $emailConfig["log"]) {
+            $this->config['custom-post-types'][] = [
+                "slug" => "rad-email-log",
+                "options" => [
+                    "public" => false,
+                    "show_ui" => true,
+                    "show_in_nav_menus" => false,
+                    "show_in_admin_bar" => false,
+                    "label" => [
+                        "Email Log",
+                    ]
+                ],
+            ];
         }
     }
 
@@ -293,7 +319,8 @@ class Site
 
         $items = json_decode(file_get_contents($manifestFile), true);
         foreach ($items as $file => $version) {
-            $extension = end(explode(".", $file));
+            $parts = explode(".", $file);
+            $extension = end($parts);
             $tag = $this->stringify($file);
             if ($extension === "js") {
                 add_action('wp_enqueue_scripts', function () use ($version, $tag) {
@@ -355,6 +382,8 @@ class Site
                 $options["has_archive"] = Util::slugify($this->humanize($cpt["slug"], true));
             }
             $names = $this->generateLabels($cpt['slug']);
+
+            // die(var_dump([$names, $options]));
 
             $newCpt = new PostType($cpt['slug'], $options, $names);
 
@@ -581,6 +610,21 @@ class Site
                 add_filter('upload_mimes', function ($file_types) {
                     $file_types['svg'] = 'image/svg+xml';
                     return $file_types;
+                });
+                add_filter('wp_handle_upload_prefilter', function ($file) {
+                    if ($file['type'] !== 'image/svg+xml') {
+                        return $file;
+                    }
+                    $sanitizer = new \enshrined\svgSanitize\Sanitizer();
+                    $sanitizer->minify(false);
+                    $dirty = file_get_contents($file['tmp_name']);
+                    $clean = $sanitizer->sanitize($dirty);
+                    if ($clean === false) {
+                        $file['error'] = 'This SVG file could not be sanitized and was rejected for security reasons.';
+                        return $file;
+                    }
+                    file_put_contents($file['tmp_name'], $clean);
+                    return $file;
                 });
                 continue;
             }
