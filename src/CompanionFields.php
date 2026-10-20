@@ -198,7 +198,7 @@ class CompanionFields
         //    `single-<post_type>.php` automatically for that post type, so no
         //    "Template Name" header or page-template meta is involved.
         $themeDir = get_template_directory();
-        $cptTemplateRegex = '/^(single|archive)-([a-z0-9_]+)\.php$/';
+        $cptTemplateRegex = '/^(single|archive)-([a-z0-9_-]+)\.php$/';
 
         foreach (scandir($themeDir) as $file) {
             if (!preg_match($cptTemplateRegex, $file, $m)) {
@@ -209,6 +209,27 @@ class CompanionFields
             $group = self::discoverGroup($file, ucfirst($postType) . ' (fields)', $postType);
             if ($group) {
                 $groups[$file] = $group;
+            }
+        }
+
+        // 3) Standalone field files for custom post types
+        //    (`post-types/<post_type>.yml`). These attach fields to a CPT without
+        //    needing a single / archive template. A single / archive companion
+        //    yml for the same post type takes precedence, so only one box (and
+        //    one nonce) is ever rendered for a post type.
+        $claimedTypes = array_filter(array_column($groups, 'post_type'));
+
+        foreach (glob($themeDir . '/post-types/*.yml') ?: [] as $yml) {
+            $postType = basename($yml, '.yml');
+            if (in_array($postType, $claimedTypes, true)) {
+                continue;
+            }
+
+            // keyed without the extension so the box id / nonce slug has no dot
+            $key = 'post-types/' . $postType;
+            $group = self::groupFromYml($yml, $key, ucfirst($postType) . ' (fields)', $postType);
+            if ($group) {
+                $groups[$key] = $group;
             }
         }
 
@@ -229,6 +250,21 @@ class CompanionFields
         $base = get_theme_file_path($filename);
         $yml = substr($base, 0, -strlen('.php')) . '.yml';
 
+        return self::groupFromYml($yml, $filename, $title, $postType);
+    }
+
+    /**
+     * Build a companion group from a yml file path. Returns null when there is
+     * no usable yml (no file, no `fields:` block, or empty).
+     *
+     * @param string      $yml       absolute path to the yml file
+     * @param string      $key       the group key (template file name, or `post-types/<type>`)
+     * @param string      $title     a human title for the group
+     * @param string|null $postType  the CPT this group belongs to (null for pages)
+     * @return array|null
+     */
+    private static function groupFromYml(string $yml, string $key, string $title, ?string $postType): ?array
+    {
         if (!file_exists($yml)) {
             return null;
         }
@@ -239,9 +275,15 @@ class CompanionFields
             return null;
         }
 
+        // Top-level `imports:` shares slice layouts with every flexible field in
+        // this file (see resolveLayoutImports).
+        $errBefore = count(self::$importErrors);
+        $importedLayouts = self::resolveLayoutImports(isset($raw['imports']) ? $raw['imports'] : null);
+        $importErrors = array_slice(self::$importErrors, $errBefore);
+
         $fields = [];
         foreach ($raw['fields'] as $name => $def) {
-            $fields[] = self::normalizeField($name, $def);
+            $fields[] = self::normalizeField($name, $def, $importedLayouts, $importErrors);
         }
 
         if (empty($fields)) {
@@ -250,7 +292,7 @@ class CompanionFields
 
         return [
             'title' => (string) $title,
-            'template' => $filename,
+            'template' => $key,
             'post_type' => $postType,
             'fields' => $fields,
             'hidden' => self::normalizeHidden(isset($raw['hidden']) ? $raw['hidden'] : null),
@@ -285,8 +327,12 @@ class CompanionFields
 
     /**
      * Normalize a single field definition from the yml `fields:` block.
+     *
+     * @param array $importedLayouts raw layout definitions inherited from the
+     *                               file's top-level `imports:` (flexible only)
+     * @param array $importErrors    messages from resolving those imports
      */
-    public static function normalizeField($name, $def): array
+    public static function normalizeField($name, $def, array $importedLayouts = [], array $importErrors = []): array
     {
         $name = (string) $name;
 
@@ -340,10 +386,26 @@ class CompanionFields
 
         // For flexible fields, `layouts:` declares the named blocks the editor
         // can add. Each layout has a `name`, optional `message` (informational,
-        // no fields) and a `fields:` map of sub-fields.
-        if ($type === 'flexible' && isset($def['layouts']) && is_array($def['layouts'])) {
+        // no fields) and a `fields:` map of sub-fields. Layouts can also come
+        // from shared slice files via `imports:` (field level) or the file's
+        // top-level `imports:`; imported layouts load first and a local layout
+        // with the same name overrides it in place.
+        if ($type === 'flexible') {
+            $errBefore = count(self::$importErrors);
+            $ownImports = self::resolveLayoutImports(isset($def['imports']) ? $def['imports'] : null);
+            if (count(self::$importErrors) > $errBefore) {
+                foreach (array_slice(self::$importErrors, $errBefore) as $error) {
+                    $importErrors[] = $name . ': ' . $error;
+                }
+            }
+
+            $merged = self::mergeLayoutLists(
+                self::mergeLayoutLists($importedLayouts, $ownImports),
+                isset($def['layouts']) && is_array($def['layouts']) ? $def['layouts'] : []
+            );
+
             $layouts = [];
-            foreach ($def['layouts'] as $layout) {
+            foreach ($merged as $layout) {
                 if (!is_array($layout) || empty($layout['name'])) {
                     continue;
                 }
@@ -351,9 +413,100 @@ class CompanionFields
                 $layouts[$layout['name']] = $layout;
             }
             $field['layouts'] = $layouts;
+
+            if ($importErrors) {
+                $field['import_errors'] = array_values(array_unique($importErrors));
+            }
         }
 
         return $field;
+    }
+
+    /**
+     * Errors surfaced while resolving yml `imports:` this request.
+     */
+    private static $importErrors = [];
+
+    /**
+     * Resolve a yml `imports:` value (a path or list of paths, relative to the
+     * theme root) into a merged, ordered list of raw layout definitions.
+     *
+     * Each imported file may itself declare `layouts:` and nested `imports:`
+     * (recursion is cycle-guarded). Imported files must live inside the theme
+     * directory. Failures are recorded in $importErrors (rendered as an admin
+     * notice) rather than silently dropping slices.
+     *
+     * @param  string|array|null $imports
+     * @param  array             $seen   absolute paths already in this chain
+     * @return array list of raw layout definitions
+     */
+    private static function resolveLayoutImports($imports, array $seen = []): array
+    {
+        if ($imports === null || $imports === '') {
+            return [];
+        }
+        if (is_string($imports)) {
+            $imports = [$imports];
+        }
+        if (!is_array($imports)) {
+            self::$importErrors[] = 'imports: must be a file path or a list of file paths.';
+            return [];
+        }
+
+        $themeReal = realpath(get_template_directory());
+        if ($themeReal === false) {
+            return [];
+        }
+
+        $layouts = [];
+        foreach ($imports as $import) {
+            $import = trim((string) $import);
+            if ($import === '') {
+                continue;
+            }
+
+            $path = realpath(get_template_directory() . '/' . ltrim($import, '/'));
+            if ($path === false || !is_file($path) || strpos($path, $themeReal . DIRECTORY_SEPARATOR) !== 0) {
+                self::$importErrors[] = 'slice import not found (or outside the theme): ' . $import;
+                continue;
+            }
+            if (in_array($path, $seen, true)) {
+                continue;
+            }
+            $seen[] = $path;
+
+            $raw = Yaml::parseFile($path);
+            if (!is_array($raw)) {
+                self::$importErrors[] = 'slice import is not readable YAML: ' . $import;
+                continue;
+            }
+
+            if (isset($raw['imports'])) {
+                $layouts = self::mergeLayoutLists($layouts, self::resolveLayoutImports($raw['imports'], $seen));
+            }
+            $fileLayouts = (isset($raw['layouts']) && is_array($raw['layouts'])) ? $raw['layouts'] : [];
+            $layouts = self::mergeLayoutLists($layouts, $fileLayouts);
+        }
+
+        return $layouts;
+    }
+
+    /**
+     * Merge raw layout lists by layout name: a later definition replaces an
+     * earlier one with the same name in place (keeping its position); unseen
+     * names are appended in order.
+     */
+    private static function mergeLayoutLists(array $base, array $overlay): array
+    {
+        $keyed = [];
+        foreach ([$base, $overlay] as $list) {
+            foreach ($list as $layout) {
+                if (is_array($layout) && isset($layout['name'])) {
+                    $keyed[(string) $layout['name']] = $layout;
+                }
+            }
+        }
+        return array_values($keyed);
     }
 
     /**
@@ -408,6 +561,22 @@ class CompanionFields
             $layout['message'] = (string) $def['message'];
         }
 
+        // `description:` is short helper text shown in the slice picker modal
+        // alongside the layout's title and thumbnail.
+        if (isset($def['description'])) {
+            $layout['description'] = (string) $def['description'];
+        }
+
+        // `thumbnail:` previews the slice in the picker modal. A bare filename
+        // resolves inside assets/thumbnails/; a value with a slash is relative
+        // to the theme root. The extension may be omitted (see layoutThumbnailUrl).
+        if (isset($def['thumbnail']) && trim((string) $def['thumbnail']) !== '') {
+            $url = self::layoutThumbnailUrl((string) $def['thumbnail']);
+            if ($url !== null) {
+                $layout['thumbnail'] = $url;
+            }
+        }
+
         if (isset($def['fields']) && is_array($def['fields'])) {
             foreach ($def['fields'] as $subName => $subDef) {
                 // A bare `message:` scalar under fields: is layout info, not a field.
@@ -422,6 +591,44 @@ class CompanionFields
         }
 
         return $layout;
+    }
+
+    /**
+     * Resolve a layout's `thumbnail:` value to a theme URL.
+     *
+     * A bare filename (no slash) is looked up inside `assets/thumbnails/`; a
+     * value containing a slash is treated as relative to the theme root. The
+     * extension may be omitted, in which case common image extensions are
+     * tried in order (png first, so dropping in a real PNG replaces a shipped
+     * .svg placeholder with no yml change). Returns null when no file exists,
+     * which renders a placeholder tile in the picker.
+     */
+    private static function layoutThumbnailUrl(string $thumbnail): ?string
+    {
+        $relative = ltrim(trim($thumbnail), '/');
+        if ($relative === '') {
+            return null;
+        }
+
+        if (strpos($relative, '/') === false) {
+            $relative = 'assets/thumbnails/' . $relative;
+        }
+
+        $candidates = [$relative];
+        if (!preg_match('/\.(png|jpe?g|webp|svg|gif)$/i', $relative)) {
+            foreach (['png', 'jpg', 'jpeg', 'webp', 'svg', 'gif'] as $ext) {
+                $candidates[] = $relative . '.' . $ext;
+            }
+        }
+
+        $themeDir = get_template_directory();
+        foreach ($candidates as $candidate) {
+            if (file_exists($themeDir . '/' . $candidate)) {
+                return get_template_directory_uri() . '/' . $candidate;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -591,16 +798,201 @@ JS;
     }
 
     /**
-     * Render a single field. Unknown / unimplemented types render a visible
-     * placeholder instead of being silently dropped.
+     * Whether the shared admin stylesheet has been emitted this request. The
+     * first rendered field prints it; every later call returns nothing.
+     */
+    private static $adminStylesPrinted = false;
+
+    /**
+     * Render a single field, wrapped in a per-field container so the shared
+     * stylesheet can manage field spacing/typography (see adminStyles()).
      */
     public static function renderField(array $field, $value = ''): string
+    {
+        $type = isset($field['type']) ? $field['type'] : 'text';
+        return '<div class="rad-companion-field rad-companion-field--' . esc_attr(self::dashedSlug($type)) . '">'
+            . self::adminStyles()
+            . self::renderFieldInner($field, $value)
+            . '</div>';
+    }
+
+    /**
+     * The companion fields admin stylesheet, emitted once per page. Covers the
+     * generic field chrome (labels, spacing), media previews, repeaters,
+     * flexible blocks and the slice picker modal.
+     */
+    private static function adminStyles(): string
+    {
+        if (self::$adminStylesPrinted) {
+            return '';
+        }
+        self::$adminStylesPrinted = true;
+
+        return '<style>'
+            // --- generic field chrome ---
+            . '.rad-companion-fields .rad-companion-field{margin:0 0 20px;}'
+            . '.rad-companion-fields .form-label,.rad-companion-fields p.form-label{font-weight:600;font-size:13px;line-height:1.4;color:#1d2327;margin:0 0 5px;}'
+            . '.rad-companion-fields .rad-required label::after{content:" *";color:#d63638;font-weight:700;}'
+            // ACF-style field rows: hairline separator between consecutive fields.
+            . '.rad-companion-fields .rad-companion-field + .rad-companion-field{border-top:1px solid #f0f0f1;padding-top:16px;}'
+            . '.rad-companion-fields .description{margin-top:6px;}'
+            // Fields stack: label above control.
+            . '.rad-companion-fields .form-label label{display:inline-block;}'
+            // --- inputs, selects, textareas ---
+            . '.rad-companion-field-control input[type=text],.rad-companion-field-control input[type=email],'
+            . '.rad-companion-field-control input[type=number],.rad-companion-field-control input[type=tel],'
+            . '.rad-companion-field-control input[type=url],.rad-companion-field-control input[type=password],'
+            . '.rad-companion-field-control input[type=date],.rad-companion-field-control input[type=datetime-local],'
+            . '.rad-companion-field-control input[type=time],.rad-companion-field-control input[type=week],'
+            . '.rad-companion-field-control input[type=month],.rad-companion-field-control textarea:not(.wp-editor-area),'
+            . '.rad-companion-field-control select{display:block;width:100%;max-width:600px;padding:6px 10px;'
+            . 'font-size:14px;line-height:1.5;color:#1d2327;background:#fff;border:1px solid #c6cad1;border-radius:4px;}'
+            . '.rad-companion-field-control input:focus,.rad-companion-field-control textarea:focus,'
+            . '.rad-companion-field-control select:focus{border-color:#2271b1;box-shadow:0 0 0 1px #2271b1;'
+            . 'outline:2px solid transparent;color:inherit;}'
+            . '.rad-companion-field-control input::placeholder,.rad-companion-field-control textarea::placeholder{color:#8c8f94;}'
+            . '.rad-companion-field-control input[type=number],.rad-companion-field-control input[type=date],'
+            . '.rad-companion-field-control input[type=datetime-local],.rad-companion-field-control input[type=time],'
+            . '.rad-companion-field-control input[type=week],.rad-companion-field-control input[type=month]{max-width:280px;}'
+            . '.rad-companion-field-control select{max-width:400px;}'
+            . '.rad-companion-field-control textarea.large-text{min-height:90px;}'
+            // --- checkbox ---
+            . '.rad-companion-checkbox-wrap{display:inline-flex;align-items:center;min-height:30px;}'
+            . '.rad-companion-checkbox-wrap input[type=checkbox]{width:18px;height:18px;min-width:18px;margin:0;cursor:pointer;}'
+            // --- media fields ---
+            . '.rad-companion-media .description{margin:0.5em 0 0;}'
+            . '.rad-companion-media-preview{max-width:220px;min-width:120px;min-height:64px;max-height:160px;overflow:hidden;'
+            . 'display:flex;align-items:center;justify-content:center;border:1px solid #d7dadf;border-radius:6px;background:#fff;}'
+            . '.rad-companion-media-preview .description{color:#8c8f94;padding:12px 10px;margin:0;}'
+            . '.rad-companion-media-img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;display:block;background:#f6f7f7;}'
+            . '.rad-companion-media .button{margin-top:8px;}'
+            // --- wysiwyg fields ---
+            . '.rad-companion-wysiwyg .wp-editor-area{min-height:200px;}'
+            // --- repeaters (ACF-style table) ---
+            . '.rad-companion-repeater-table{overflow-x:auto;}'
+            . '.rad-companion-repeater-head{display:grid;align-items:center;background:#f6f7f9;'
+            . 'border:1px solid #c8cdd3;border-bottom:1px solid #c8cdd3;border-radius:6px 6px 0 0;'
+            . 'font-size:12px;font-weight:600;color:#50575e;line-height:1.4;}'
+            . '.rad-companion-repeater-head-cell{padding:8px 12px;min-width:0;border-right:1px solid #e2e4e7;}'
+            . '.rad-companion-repeater-head .rad-companion-repeater-gutter{padding:0 6px 0 10px;min-height:0;'
+            . 'align-self:stretch;border-top-left-radius:5px;}'
+            . '.rad-companion-repeater-row:last-child .rad-companion-repeater-gutter{border-bottom-left-radius:5px;}'
+            // No overflow:hidden here and the outer frame lives on the ROWS,
+            // not this box: when the table scrolls, rows extend past this
+            // container's width, and a border/clip on the container would end
+            // mid-table (or cut off the right-hand columns).
+            . '.rad-companion-repeater-rows{background:#fff;position:relative;}'
+            . '.rad-companion-repeater-rows:empty{border:1px solid #c8cdd3;border-top:0;border-radius:0 0 6px 6px;}'
+            . '.rad-companion-repeater-row{display:grid;align-items:stretch;'
+            . 'border-left:1px solid #c8cdd3;border-right:1px solid #c8cdd3;}'
+            . '.rad-companion-repeater-row:last-child{border-bottom:1px solid #c8cdd3;border-radius:0 0 6px 6px;}'
+            . '.rad-companion-repeater-row + .rad-companion-repeater-row{border-top:1px solid #e2e4e7;}'
+            . '.rad-companion-repeater-row:hover{background:#fbfcfd;}'
+            . '.rad-companion-repeater-row.dragging{opacity:.4;}'
+            . '.rad-companion-repeater-row.drag-over{box-shadow:inset 0 0 0 2px #2271b1;}'
+            . '.rad-companion-repeater-gutter{display:flex;align-items:center;gap:6px;'
+            . 'padding:12px 6px 0 10px;min-height:46px;background:#f6f7f9;border-right:1px solid #e2e4e7;}'
+            . '.rad-companion-repeater-handle{cursor:grab;color:#a7aaad;font-size:18px;width:18px;height:18px;}'
+            . '.rad-companion-repeater-handle:hover{color:#2271b1;}'
+            . '.rad-companion-repeater-row-number{font-size:12px;font-weight:600;color:#787c82;}'
+            . '.rad-companion-repeater-cell{padding:10px 12px;min-width:0;border-right:1px solid #e2e4e7;}'
+            . '.rad-companion-repeater-cell .rad-companion-field{margin:0;border-top:0;padding-top:0;}'
+            // Sub-field labels live in the table header; the per-cell one is
+            // kept for screen readers (and restored on mobile, see below).
+            . '.rad-companion-repeater-cell .form-label{position:absolute;width:1px;height:1px;margin:-1px;'
+            . 'padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0;font-weight:400;}'
+            . '.rad-companion-repeater-cell .rad-companion-field-control input,'
+            . '.rad-companion-repeater-cell .rad-companion-field-control select,'
+            . '.rad-companion-repeater-cell .rad-companion-field-control textarea:not(.wp-editor-area){max-width:100%;}'
+            . '.rad-companion-repeater-cell .rad-companion-media-preview{max-width:100%;min-width:0;max-height:100px;}'
+            . '.rad-companion-repeater-actions{display:flex;justify-content:flex-end;padding:12px 10px 0 4px;}'
+            . '.rad-companion-repeater .rad-companion-repeater-remove{color:#a7aaad;text-decoration:none;padding:0;}'
+            . '.rad-companion-repeater .rad-companion-repeater-remove:hover,'
+            . '.rad-companion-repeater .rad-companion-repeater-remove:focus{color:#d63638;text-decoration:none;}'
+            . '.rad-companion-repeater .rad-companion-repeater-remove .dashicons{width:18px;height:18px;font-size:18px;}'
+            . '.rad-companion-repeater-add-wrap{margin:8px 0 0;}'
+            . '.rad-companion-repeater-rows:empty::before{content:"No rows yet.";display:block;padding:12px;'
+            . 'text-align:center;color:#8c8f94;font-size:13px;}'
+            // Narrow screens: stack the cells into labelled blocks.
+            . '@media (max-width:782px){'
+            . '.rad-companion-repeater-head{display:none;}'
+            . '.rad-companion-repeater-row{display:block;padding:10px 12px 4px;min-width:0 !important;}'
+            . '.rad-companion-repeater-gutter{padding:0 0 6px;min-height:0;background:none;border-right:0;}'
+            . '.rad-companion-repeater-cell{padding:6px 0;border-right:0;}'
+            . '.rad-companion-repeater-cell .form-label{position:static;width:auto;height:auto;margin:0 0 5px;'
+            . 'overflow:visible;clip:auto;clip-path:none;white-space:normal;font-weight:600;font-size:13px;'
+            . 'color:#1d2327;line-height:1.4;}'
+            . '.rad-companion-repeater-actions{justify-content:flex-start;padding:4px 0 8px;}'
+            . '}'
+            // --- flexible blocks ---
+            . '.rad-flexible-block{border:1px solid #c8cdd3;border-radius:6px;margin:0 0 10px;position:relative;'
+            . 'background:#fff;box-shadow:0 1px 1px rgba(0,0,0,.05);}'
+            . '.rad-flexible-block:hover{border-color:#b4b9be;}'
+            . '.rad-flexible-block-head{display:flex;align-items:center;padding:9px 12px;border-bottom:1px solid #d7dadf;'
+            . 'background:#f6f7f9;border-radius:6px 6px 0 0;cursor:pointer;}'
+            . '.rad-flexible-block-handle{cursor:grab;margin-right:10px;color:#a7aaad;font-size:18px;width:18px;height:18px;}'
+            . '.rad-flexible-block-handle:hover{color:#2271b1;}'
+            . '.rad-flexible-blocks:empty::before{content:"No sections added yet — use the button below to add one.";'
+            . 'display:block;padding:18px;margin:6px 0 14px;text-align:center;color:#8c8f94;font-size:13px;'
+            . 'border:1px dashed #c3c4c7;border-radius:6px;background:#fbfbfc;}'
+            . '.rad-flexible-block-title{font-weight:700;font-size:13px;color:#1d2327;margin-right:auto;}'
+            . '.rad-flexible-head-actions{display:flex;align-items:center;gap:8px;margin-left:auto;}'
+            . '.rad-flexible-collapse{cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:0 4px;}'
+            . '.rad-flexible-collapse-icon{display:inline-block;font-size:16px;width:16px;height:16px;'
+            . 'transition:transform .15s ease;}'
+            . '.rad-flexible-block-body{padding:14px 16px 4px;}'
+            . '.rad-flexible-block-body > .rad-companion-field:last-child{margin-bottom:10px;}'
+            . '.rad-flexible-message{color:#50575e;padding:2px 0 12px;}'
+            . '.rad-flexible-block.is-collapsed{border-radius:6px;}'
+            . '.rad-flexible-block.is-collapsed .rad-flexible-block-head{border-bottom:0;border-radius:6px;}'
+            . '.rad-flexible-block.is-collapsed .rad-flexible-block-body{display:none;}'
+            . '.rad-flexible-block.is-collapsed .rad-flexible-collapse-icon{transform:rotate(-90deg);}'
+            . '.rad-flexible-block.dragging{opacity:.4;}'
+            . '.rad-flexible-block.drag-over{border-style:dashed;}'
+            . '.rad-flexible-bulk{display:flex;justify-content:flex-end;gap:8px;margin:0 0 8px;}'
+            . '.rad-flexible-bulk--bottom{margin:10px 0 0;}'
+            . '.rad-flexible-blocks{clear:both;position:relative;}'
+            . '.rad-flexible-drop-indicator{position:absolute;left:0;right:0;height:0;pointer-events:none;z-index:10;}'
+            . '.rad-flexible-drop-indicator::before{content:"";position:absolute;left:0;right:0;top:-2px;height:4px;'
+            . 'border-radius:2px;background:#2271b1;box-shadow:0 0 0 1px rgba(34,113,177,.15);}'
+            . '.rad-flexible-drop-indicator::after{content:"";position:absolute;left:-4px;top:-5px;width:8px;height:8px;'
+            . 'border-radius:50%;background:#2271b1;}'
+            . '.rad-flexible-collapse-all{cursor:pointer;display:inline-flex;align-items:center;gap:6px;'
+            . 'padding:3px 10px;border:1px solid #c8cdd3;border-radius:4px;background:#fff;color:#2271b1;'
+            . 'font-size:12px;line-height:1.5;}'
+            . '.rad-flexible-collapse-all:hover{border-color:#2271b1;background:#f6f7f9;}'
+            . '.rad-flexible-collapse-all-icon{display:inline-block;font-size:16px;width:16px;height:16px;'
+            . 'transition:transform .15s ease;}'
+            . '.rad-flexible-bulk.is-all-collapsed .rad-flexible-collapse-all-icon{transform:rotate(-90deg);}'
+            . '.rad-flexible-add{margin:0 0 10px;}'
+            . '.rad-flexible-add-open{display:inline-flex;align-items:center;gap:6px;}'
+            . '.rad-flexible .rad-flexible-remove{text-decoration:none;}'
+            . '.rad-flexible .rad-flexible-remove:hover,.rad-flexible .rad-flexible-remove:focus{text-decoration:none;}'
+            . '.rad-flexible .rad-flexible-collapse{text-decoration:none;}'
+            . '.rad-flexible .rad-flexible-collapse:hover,.rad-flexible .rad-flexible-collapse:focus{text-decoration:none;}'
+            . '.rad-flexible .rad-flexible-collapse-all{text-decoration:none;}'
+            . '.rad-flexible .rad-flexible-collapse-all:hover,.rad-flexible .rad-flexible-collapse-all:focus{text-decoration:none;}'
+            . '.rad-flexible-drag-card{background:#fff;border:1px solid #2271b1;border-radius:6px;'
+            . 'box-shadow:0 2px 8px rgba(0,0,0,.25);overflow:hidden;font-size:13px;color:#1d2327;}'
+            . '.rad-flexible-drag-card-title{font-weight:700;padding:8px 10px;background:#f6f7f9;border-bottom:1px solid #d7dadf;}'
+            . '.rad-flexible-drag-card-body{padding:14px 10px;color:#a7aaad;font-size:18px;line-height:1;}'
+            . 'body.rad-flexible-dragging iframe{pointer-events:none;}'
+            // --- slice picker modal ---
+            . self::flexiblePickerStyles()
+            . '</style>';
+    }
+
+    /**
+     * Render a single field's control(s). Unknown / unimplemented types render
+     * a visible placeholder instead of being silently dropped.
+     */
+    private static function renderFieldInner(array $field, $value = ''): string
     {
         $type = $field['type'];
         $id = 'rad_' . $field['name'];
         $label = esc_html($field['label']);
-        $labelTag = '<p class="form-label"><label for="' . $id . '">' . $label . '</label></p>';
         $required = !empty($field['required']);
+        $labelTag = '<p class="form-label' . ($required ? ' rad-required' : '') . '"><label for="' . $id . '">' . $label . '</label></p>';
         $req = $required ? ' required' : '';
         $hint = isset($field['hint']) ? '<p class="description">' . esc_html((string) $field['hint']) . '</p>' : '';
         $value = (string) $value;
@@ -611,12 +1003,15 @@ JS;
             $value = is_scalar($field['default']) ? (string) $field['default'] : '';
         }
 
+        // Each branch builds only the control; the label and hint are assembled
+        // around it so .rad-companion-field can lay them out as a labelled row
+        // (label column on the left, control and hint on the right).
         switch ($type) {
             case 'textarea':
-                return $labelTag
-                    . '<textarea id="' . $id . '" name="' . $id . '"' . $req . ' class="large-text">'
+                $control = '<textarea id="' . $id . '" name="' . $id . '"' . $req . ' class="large-text">'
                     . esc_textarea($value)
-                    . '</textarea>' . $hint;
+                    . '</textarea>';
+                break;
 
             case 'select':
                 $options = isset($field['options']) ? (array) $field['options'] : [];
@@ -636,49 +1031,61 @@ JS;
                         . ($selected ? ' selected' : '')
                         . '>' . esc_html((string) $text) . '</option>';
                 }
-                return $labelTag
-                    . '<select id="' . $id . '" name="' . $id . '"' . $req . '>' . $opts . '</select>' . $hint;
+                $control = '<select id="' . $id . '" name="' . $id . '"' . $req . '>' . $opts . '</select>';
+                break;
 
             case 'checkbox':
                 $checked = $value === '1' || $value === true || $value === 'true';
-                return '<p class="form-label">'
-                    . '<label for="' . $id . '"><input type="checkbox" id="' . $id . '" name="' . $id
-                    . '" value="1"' . ($checked ? ' checked' : '') . $req . ' /> ' . $label . '</label>'
-                    . '</p>' . $hint;
+                // The field label lives in the label column; its `for` still
+                // toggles the box, so the control is just the (styled) box.
+                $control = '<span class="rad-companion-checkbox-wrap">'
+                    . '<input type="checkbox" id="' . $id . '" name="' . $id
+                    . '" value="1"' . ($checked ? ' checked' : '') . $req . ' />'
+                    . '</span>';
+                break;
 
             case 'media':
-                return self::renderMediaField($field, $value, $label, $id, $labelTag, $hint);
+                $control = self::renderMediaField($field, $value, $id);
+                break;
 
             case 'repeater':
-                return self::renderRepeaterField($field, $value, $label, $id, $labelTag, $hint);
+                $control = self::renderRepeaterField($field, $value, $id);
+                break;
 
             case 'flexible':
-                return self::renderFlexibleField($field, $value, $label, $id, $labelTag, $hint);
+                $control = self::renderFlexibleField($field, $value, $id);
+                break;
 
             case 'wysiwyg':
-                return self::renderWysiwygField($field, $value, $label, $id, $labelTag, $hint);
+                $control = self::renderWysiwygField($field, $value, $id);
+                break;
 
             default:
                 if (self::unimplemented($type)) {
-                    return $labelTag
-                        . '<p class="description"><em>' . esc_html($type) . ' fields are not implemented yet.</em></p>'
-                        . $hint;
+                    $control = '<p class="description"><em>' . esc_html($type) . ' fields are not implemented yet.</em></p>';
+                    break;
                 }
 
                 // All single-line input types (text, email, number, url, ...)
                 $typeAttr = in_array($type, self::SUPPORTED, true) ? $type : 'text';
-                return $labelTag
-                    . '<input type="' . esc_attr($typeAttr) . '" id="' . $id . '" name="' . $id
-                    . '"' . $req . ' value="' . esc_attr($value) . '" />'
-                    . $hint;
+                $placeholder = isset($field['placeholder'])
+                    ? ' placeholder="' . esc_attr((string) $field['placeholder']) . '"'
+                    : '';
+                $control = '<input type="' . esc_attr($typeAttr) . '" id="' . $id . '" name="' . $id
+                    . '"' . $req . ' value="' . esc_attr($value) . '"' . $placeholder . ' />';
+                break;
         }
+
+        return $labelTag
+            . '<div class="rad-companion-field-control">' . $control . '</div>'
+            . $hint;
     }
 
     /**
      * Render a media (image) field. The attachment id is stored as JSON so the
      * frontend can resolve it to a url / alt / full array on demand.
      */
-    private static function renderMediaField(array $field, $value, string $label, string $id, string $labelTag, string $hint): string
+    private static function renderMediaField(array $field, $value, string $id): string
     {
         $current = self::mediaValueToArray($value);
 
@@ -695,16 +1102,13 @@ JS;
             'alt' => (string) $currentAlt,
         ]);
 
-        return $labelTag
-            . '<div class="rad-companion-media" id="rad-companion-media-' . esc_attr($field['name']) . '">'
+        return '<div class="rad-companion-media" id="rad-companion-media-' . esc_attr($field['name']) . '">'
             . '<input type="hidden" id="' . $id . '" name="' . $id . '" value="' . esc_attr($inputValue) . '" />'
             . '<div class="rad-companion-media-preview" data-id="' . esc_attr($currentId) . '">'
             . ($currentUrl !== '' ? '<img class="rad-companion-media-img" src="' . esc_url($currentUrl) . '" alt="' . esc_attr($currentAlt) . '" />' : '<p class="description">No media selected.</p>')
             . '</div>'
             . '<a href="#" class="button rad-companion-choose" data-name="' . esc_attr($field['name']) . '">Choose Media</a>'
-            . '<style>.rad-companion-media .description{margin:0.5em 0 0;}.rad-companion-media-preview{max-width:220px;max-height:160px;overflow:hidden;border:1px solid #dcdcde;border-radius:4px;}.rad-companion-media-img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;display:block;margin:0 auto;background:#f0f0f1;}.rad-companion-fields .form-label{font-weight:700;font-size:1.05em;color:#1d2327;margin:1.25em 0 0.4em;}.rad-companion-fields .form-label:first-child{margin-top:0;}</style>'
-            . '</div>'
-            . $hint;
+            . '</div>';
     }
 
     /**
@@ -715,7 +1119,7 @@ JS;
      * multiple wysiwyg fields (including nested ones in rows) coexist without
      * colliding.
      */
-    private static function renderWysiwygField(array $field, $value, string $label, string $id, string $labelTag, string $hint): string
+    private static function renderWysiwygField(array $field, $value, string $id): string
     {
         // Unique editor id derived from the (already unique) input id. The wp_editor
         // instance id must be alphanumeric without brackets, so map the scoped
@@ -738,13 +1142,10 @@ JS;
         );
         $editor = ob_get_clean();
 
-        return $labelTag
-            . '<div class="rad-companion-wysiwyg" id="rad-companion-wysiwyg-' . esc_attr(self::dashedSlug($id)) . '">'
+        return '<div class="rad-companion-wysiwyg" id="rad-companion-wysiwyg-' . esc_attr(self::dashedSlug($id)) . '">'
             . $editor
             . self::wysiwygScript()
-            . '<style>.rad-companion-wysiwyg .wp-editor-area{min-height:200px;}</style>'
-            . '</div>'
-            . $hint;
+            . '</div>';
     }
 
     /**
@@ -774,9 +1175,11 @@ JS;
      * an "Add Row" button, per-row remove, and drag-and-drop reordering. The
      * hidden `rad_<name>` input holds the serialized JSON array submitted on save.
      */
-    private static function renderRepeaterField(array $field, $value, string $label, string $id, string $labelTag, string $hint): string
+    private static function renderRepeaterField(array $field, $value, string $id): string
     {
         $subFields = isset($field['fields']) ? $field['fields'] : [];
+        // "Features" repeater → "Add Feature"; data-item-label reuses it in the remove confirm.
+        $itemLabel = self::singularizeLabel($field['label'] ?? '');
 
         // Decode stored rows; each sub-value is keyed by sub-field name. The DB
         // stores these serialized; normalise any media sub-field into an array so
@@ -801,30 +1204,91 @@ JS;
             }
         }
 
+        // ACF renders repeaters as a table: a header row of sub-field labels,
+        // then one grid row per row, columns aligned to the header. The column
+        // template (gutter | N sub-field cells | actions) is identical on the
+        // head and every row; it is inlined as a style because the column
+        // count varies per repeater and CSS cannot repeat() on a variable.
+        $count = count($subFields);
+        // Columns never shrink below 120px: past that the table keeps its
+        // width and scrolls horizontally (see .rad-companion-repeater-table).
+        // The shared min-width keeps the head and every row on identical
+        // track widths so their columns stay aligned while scrolling.
+        $colsStyle = $count > 0
+            ? ' style="grid-template-columns:48px repeat(' . (int) $count . ', minmax(160px,1fr)) 64px;'
+            . 'min-width:' . (112 + 160 * (int) $count) . 'px"'
+            : '';
+
+        $head = '';
+        if ($count > 0) {
+            $head = '<div class="rad-companion-repeater-head"' . $colsStyle . '>'
+                . '<div class="rad-companion-repeater-gutter" aria-hidden="true"></div>';
+            foreach ($subFields as $sub) {
+                $head .= '<div class="rad-companion-repeater-head-cell">' . esc_html($sub['label']) . '</div>';
+            }
+            $head .= '<div class="rad-companion-repeater-actions"></div></div>';
+        }
+
         // Sub-field input names render as rad_<rowToken>[<sub>]. Using a short
         // row token (blank / row-N) avoids a double rad_ prefix and keeps the
         // JS name-matching regex simple.
-        $blankRow = self::renderRepeaterRow($subFields, [], 'blank');
+        $blankRow = self::renderRepeaterRow($subFields, [], 'blank', 1, $colsStyle);
 
         $existingRows = '';
         foreach ($rows as $i => $row) {
-            $existingRows .= self::renderRepeaterRow($subFields, $row, 'row-' . $i);
+            $existingRows .= self::renderRepeaterRow($subFields, $row, 'row-' . $i, $i + 1, $colsStyle);
         }
 
         // The top-level hidden input carries the normalised rows as JSON so the
         // JS sync() can rebuild it; the DB stays serialized (see sanitizeValue).
         $inputValue = json_encode($rows);
 
-        return $labelTag
-            . '<div class="rad-companion-repeater" id="rad-companion-repeater-' . esc_attr($field['name']) . '">'
+        return '<div class="rad-companion-repeater" id="rad-companion-repeater-' . esc_attr($field['name']) . '"'
+            . ' data-item-label="' . esc_attr($itemLabel) . '">'
             . '<input type="hidden" id="' . $id . '" name="' . $id . '" value="' . esc_attr($inputValue) . '" />'
             . '<template id="rad-companion-row-template-' . esc_attr($field['name']) . '">' . $blankRow . '</template>'
+            . '<div class="rad-companion-repeater-table">'
+            . $head
             . '<div class="rad-companion-repeater-rows">' . $existingRows . '</div>'
-            . '<p class="rad-companion-repeater-add-wrap"><a href="#" class="button rad-companion-repeater-add">+ Add Row</a></p>'
-            . self::repeaterScript()
-            . '<style>.rad-companion-repeater-row{border:1px solid #dcdcde;padding:10px;margin:0 0 8px;border-radius:4px;position:relative;} .rad-companion-repeater-handle{cursor:grab;float:left;margin-right:8px;color:#666;} .rad-companion-repeater-row.dragging{opacity:.4;} .rad-companion-repeater-row.drag-over{border-style:dashed;} .rad-companion-repeater-add-wrap{margin:0;text-align:right;} .rad-companion-repeater-add-wrap .rad-companion-repeater-add{display:inline-block;margin-top:0;border-radius:0 0 4px 4px;} .rad-companion-repeater .rad-companion-repeater-remove{text-decoration:none;} .rad-companion-repeater .rad-companion-repeater-remove:hover,.rad-companion-repeater .rad-companion-repeater-remove:focus{text-decoration:none;}</style>'
             . '</div>'
-            . $hint;
+            . '<p class="rad-companion-repeater-add-wrap"><a href="#" class="button rad-companion-repeater-add">+ Add '
+            . esc_html($itemLabel) . '</a></p>'
+            . self::repeaterScript()
+            . '</div>';
+    }
+
+    /**
+     * Singular form of a plural field label for row buttons: a "Features"
+     * repeater gets "Add Feature", "Team Members" gets "Add Team Member".
+     * Only the last word is inflected; anything the rules cannot handle is
+     * returned unchanged.
+     */
+    private static function singularizeLabel(?string $label, string $fallback = 'Row'): string
+    {
+        $label = trim((string) $label);
+        if ($label === '') {
+            return $fallback;
+        }
+        $parts = preg_split('/\s+/', $label);
+        $parts[] = self::singularizeWord((string) array_pop($parts));
+        return implode(' ', $parts);
+    }
+
+    private static function singularizeWord(string $word): string
+    {
+        if (mb_strlen($word) <= 3 || preg_match('/(?:us|is|as|ss)$/i', $word)) {
+            return $word;
+        }
+        if (preg_match('/ies$/i', $word)) {
+            return substr($word, 0, -3) . 'y';
+        }
+        if (preg_match('/(?:ss|x|z|ch|sh)es$/i', $word)) {
+            return substr($word, 0, -2);
+        }
+        if (preg_match('/s$/i', $word)) {
+            return substr($word, 0, -1);
+        }
+        return $word;
     }
 
     /**
@@ -835,7 +1299,7 @@ JS;
      * (serialized array), except each row carries a `_layout` key so blocks keep
      * their identity.
      */
-    private static function renderFlexibleField(array $field, $value, string $label, string $id, string $labelTag, string $hint): string
+    private static function renderFlexibleField(array $field, $value, string $id): string
     {
         $layouts = isset($field['layouts']) && is_array($field['layouts']) ? $field['layouts'] : [];
 
@@ -886,14 +1350,25 @@ JS;
         // JS sync(); the DB stays serialized (see sanitizeValue).
         $inputValue = json_encode($blocks);
 
+        // Surface broken `imports:` in the field itself, so a misnamed slice
+        // file is visible to whoever is editing rather than silently missing.
+        $notices = '';
+        if (!empty($field['import_errors'])) {
+            $notices = '<div class="notice notice-error inline">';
+            foreach ($field['import_errors'] as $error) {
+                $notices .= '<p>Rad slices — ' . esc_html($error) . '</p>';
+            }
+            $notices .= '</div>';
+        }
+
+        // The old dropdown+Add is replaced by a single button that opens a
+        // card-grid modal (one card per layout: thumbnail, title, description).
         $selector = '<div class="rad-flexible-add">'
-            . '<label class="screen-reader-text" for="rad-flexible-add-' . esc_attr($field['name']) . '">Add a section</label> '
-            . '<select id="rad-flexible-add-' . esc_attr($field['name']) . '" class="rad-flexible-add-select">'
-            . '<option value="">Select a layout&hellip;</option>'
-            . self::flexibleLayoutOptions($layouts)
-            . '</select> '
-            . '<a href="#" class="button rad-flexible-add-btn">Add</a>'
-            . '</div>';
+            . '<button type="button" class="button button-primary rad-flexible-add-open" aria-haspopup="dialog">'
+            . '<span class="rad-flexible-add-icon" aria-hidden="true">&#x2B;</span> Add Slice'
+            . '</button>'
+            . '</div>'
+            . self::flexiblePickerModal($field, $layouts);
 
         // A "collapse all / expand all" control rendered above and below the
         // blocks so it's reachable without scrolling. Its label is kept in
@@ -901,35 +1376,110 @@ JS;
         $collapseAll = function (string $placement) use ($field) {
             return '<div class="rad-flexible-bulk rad-flexible-bulk--' . esc_attr($placement) . '">'
                 . '<button type="button" class="button-link rad-flexible-collapse-all">'
-                . '<span class="rad-flexible-collapse-all-icon" aria-hidden="true">&#x25BC;</span> '
+                . '<span class="rad-flexible-collapse-all-icon dashicons dashicons-arrow-down-alt2" aria-hidden="true"></span> '
                 . '<span class="rad-flexible-collapse-all-label">Collapse all</span>'
                 . '</button>'
                 . '</div>';
         };
 
-        return $labelTag
-            . '<div class="rad-flexible" id="rad-flexible-' . esc_attr($field['name']) . '">'
+        return '<div class="rad-flexible" id="rad-flexible-' . esc_attr($field['name']) . '">'
             . '<input type="hidden" id="' . $id . '" name="' . $id . '" value="' . esc_attr($inputValue) . '" />'
+            . $notices
             . $templates
             . $collapseAll('top')
             . '<div class="rad-flexible-blocks">' . $existing . '</div>'
             . $collapseAll('bottom')
             . $selector
-            . self::flexibleScript()
-            . '<style>.rad-flexible-block{border:1px solid #dcdcde;border-radius:4px;margin:0 0 8px;position:relative;background:#f6f7f7;}.rad-flexible-block-head{display:flex;align-items:center;padding:8px 10px;border-bottom:1px solid #dcdcde;background:#f0f0f1;border-radius:4px 4px 0 0;}.rad-flexible-block-handle{cursor:grab;margin-right:8px;color:#666;}.rad-flexible-block-title{font-weight:700;margin-right:auto;}.rad-flexible-head-actions{display:flex;align-items:center;gap:8px;margin-left:auto;}.rad-flexible-collapse{cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:0 4px;}.rad-flexible-collapse-icon{display:inline-block;transition:transform .15s ease;}.rad-flexible-block-body{padding:10px;}.rad-flexible-block.is-collapsed{border-radius:4px;}.rad-flexible-block.is-collapsed .rad-flexible-block-head{border-bottom:0;border-radius:4px;}.rad-flexible-block.is-collapsed .rad-flexible-block-body{display:none;}.rad-flexible-block.is-collapsed .rad-flexible-collapse-icon{transform:rotate(-90deg);}.rad-flexible-block.dragging{opacity:.4;}.rad-flexible-block.drag-over{border-style:dashed;}.rad-flexible-bulk{margin:0 0 8px;}.rad-flexible-bulk--top{float:right;margin-top:-25px;}.rad-flexible-bulk--bottom{margin:8px 0 0;}.rad-flexible-blocks{clear:both;position:relative;}.rad-flexible-drop-indicator{position:absolute;left:0;right:0;height:0;pointer-events:none;z-index:10;}.rad-flexible-drop-indicator::before{content:"";position:absolute;left:0;right:0;top:-2px;height:4px;border-radius:2px;background:#2271b1;box-shadow:0 0 0 1px rgba(34,113,177,.15);}.rad-flexible-drop-indicator::after{content:"";position:absolute;left:-4px;top:-5px;width:8px;height:8px;border-radius:50%;background:#2271b1;}.rad-flexible-collapse-all{cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:0 4px;}.rad-flexible-collapse-all-icon{display:inline-block;transition:transform .15s ease;}.rad-flexible-bulk.is-all-collapsed .rad-flexible-collapse-all-icon{transform:rotate(-90deg);}.rad-flexible-add{margin:0 0 10px;text-align:right;}.rad-flexible-add .rad-flexible-add-select{margin:0 6px;} .rad-flexible .rad-flexible-remove{text-decoration:none;} .rad-flexible .rad-flexible-remove:hover,.rad-flexible .rad-flexible-remove:focus{text-decoration:none;} .rad-flexible .rad-flexible-collapse{text-decoration:none;} .rad-flexible .rad-flexible-collapse:hover,.rad-flexible .rad-flexible-collapse:focus{text-decoration:none;} .rad-flexible .rad-flexible-collapse-all{text-decoration:none;} .rad-flexible .rad-flexible-collapse-all:hover,.rad-flexible .rad-flexible-collapse-all:focus{text-decoration:none;} .rad-flexible-drag-card{background:#fff;border:1px solid #2271b1;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.25);overflow:hidden;font-size:13px;color:#1d2327;}.rad-flexible-drag-card-title{font-weight:700;padding:8px 10px;background:#f0f0f1;border-bottom:1px solid #dcdcde;}.rad-flexible-drag-card-body{padding:14px 10px;color:#a7aaad;font-size:18px;line-height:1;} body.rad-flexible-dragging iframe{pointer-events:none;}</style>'
-            . $hint;
+            . self::flexibleScript();
     }
 
     /**
-     * Build the <option> list for a flexible layout selector.
+     * Build the "Add Slice" picker modal for a flexible field: a dialog with a
+     * search box and a grid of cards — one per layout, each showing its
+     * thumbnail (`thumbnail:`), label and description (`description:`). The
+     * markup is emitted hidden inside the field wrapper; the script moves it to
+     * <body> the first time it is opened so fixed positioning escapes any
+     * transformed/overflowed ancestors.
      */
-    private static function flexibleLayoutOptions(array $layouts): string
+    private static function flexiblePickerModal(array $field, array $layouts): string
     {
-        $html = '';
+        $cards = '';
         foreach ($layouts as $layoutName => $layout) {
-            $html .= '<option value="' . esc_attr($layoutName) . '">' . esc_html($layout['label']) . '</option>';
+            $thumbnail = isset($layout['thumbnail']) ? (string) $layout['thumbnail'] : '';
+            $description = isset($layout['description']) ? (string) $layout['description'] : '';
+            $search = strtolower($layoutName . ' ' . ($layout['label'] ?? '') . ' ' . $description);
+
+            $media = $thumbnail !== ''
+                ? '<img class="rad-flexible-card-img" src="' . esc_url($thumbnail) . '" alt="" loading="lazy" />'
+                : '<span class="rad-flexible-card-img--empty" aria-hidden="true"></span>';
+
+            $cards .= '<button type="button" class="rad-flexible-card"'
+                . ' data-layout="' . esc_attr($layoutName) . '"'
+                . ' data-search="' . esc_attr($search) . '">'
+                . '<span class="rad-flexible-card-media">' . $media . '</span>'
+                . '<span class="rad-flexible-card-body">'
+                . '<span class="rad-flexible-card-title">' . esc_html($layout['label']) . '</span>'
+                . ($description !== ''
+                    ? '<span class="rad-flexible-card-desc">' . esc_html($description) . '</span>'
+                    : '')
+                . '</span>'
+                . '</button>';
         }
-        return $html;
+
+        return '<div class="rad-flexible-modal" id="rad-flexible-modal-' . esc_attr($field['name']) . '"'
+            . ' hidden role="dialog" aria-modal="true" aria-label="Add a slice">'
+            . '<div class="rad-flexible-modal-backdrop"></div>'
+            . '<div class="rad-flexible-modal-dialog">'
+            . '<div class="rad-flexible-modal-head">'
+            . '<h3 class="rad-flexible-modal-title">Add Slice</h3>'
+            . '<input type="search" class="rad-flexible-modal-search" placeholder="Search slices&hellip;" />'
+            . '<button type="button" class="rad-flexible-modal-close" aria-label="Close">&times;</button>'
+            . '</div>'
+            . '<div class="rad-flexible-modal-body">'
+            . '<div class="rad-flexible-modal-grid">' . $cards . '</div>'
+            . '<p class="rad-flexible-modal-empty" hidden>No slices match your search.</p>'
+            . '</div>'
+            . '</div>'
+            . '</div>';
+    }
+
+    /**
+     * Raw CSS (no style tag) for the "Add Slice" picker modal: a centered
+     * dialog with a scrolling grid of thumbnail cards, styled after ACF.
+     */
+    private static function flexiblePickerStyles(): string
+    {
+        return 'body.rad-flexible-modal-open{overflow:hidden;}'
+            . '.rad-flexible-modal{position:fixed;inset:0;z-index:100000;}'
+            . '.rad-flexible-modal[hidden]{display:none;}'
+            . '.rad-flexible-modal-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.5);}'
+            . '.rad-flexible-modal-dialog{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);'
+            . 'width:min(760px,calc(100vw - 48px));max-height:min(78vh,720px);display:flex;flex-direction:column;'
+            . 'background:#fff;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,.28);overflow:hidden;}'
+            . '.rad-flexible-modal-head{display:flex;align-items:center;gap:12px;padding:14px 18px;'
+            . 'border-bottom:1px solid #dcdcde;background:#f6f7f7;}'
+            . '.rad-flexible-modal-title{margin:0;font-size:15px;font-weight:600;line-height:1.4;}'
+            . '.rad-flexible-modal-search{flex:1;max-width:280px;margin-left:auto;}'
+            . '.rad-flexible-modal-close{border:0;background:none;font-size:24px;line-height:1;color:#787c82;'
+            . 'cursor:pointer;padding:0 4px;}'
+            . '.rad-flexible-modal-close:hover{color:#1d2327;}'
+            . '.rad-flexible-modal-body{padding:18px;overflow-y:auto;}'
+            . '.rad-flexible-modal-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;}'
+            . '.rad-flexible-card{display:flex;flex-direction:column;text-align:left;padding:0;'
+            . 'border:1px solid #dcdcde;border-radius:6px;background:#fff;cursor:pointer;overflow:hidden;'
+            . 'transition:box-shadow .15s ease,border-color .15s ease,transform .15s ease;}'
+            . '.rad-flexible-card:hover{border-color:#2271b1;box-shadow:0 4px 12px rgba(34,113,177,.18);'
+            . 'transform:translateY(-2px);}'
+            . '.rad-flexible-card:focus-visible{outline:2px solid #2271b1;outline-offset:2px;}'
+            . '.rad-flexible-card-media{display:block;position:relative;aspect-ratio:16/9;background:#f0f0f1;}'
+            . '.rad-flexible-card-img{display:block;width:100%;height:100%;object-fit:cover;}'
+            . '.rad-flexible-card-img--empty{position:absolute;inset:0;background:#f0f0f1;}'
+            . '.rad-flexible-card-img--empty::after{content:"";position:absolute;inset:14px;'
+            . 'border:2px dashed #c3c4c7;border-radius:4px;}'
+            . '.rad-flexible-card-body{display:flex;flex-direction:column;gap:4px;padding:10px 12px 12px;}'
+            . '.rad-flexible-card-title{font-weight:600;font-size:13px;color:#1d2327;}'
+            . '.rad-flexible-card-desc{font-size:12px;line-height:1.45;color:#646970;}'
+            . '.rad-flexible-modal-empty{color:#646970;font-style:italic;margin:8px 0 0;}';
     }
 
     /**
@@ -967,11 +1517,11 @@ JS;
 
         return '<div class="rad-flexible-block" data-layout="' . esc_attr($layout['name']) . '">'
             . '<div class="rad-flexible-block-head">'
-            . '<span class="rad-flexible-block-handle" draggable="true" title="Drag to reorder">&#x2807;</span>'
+            . '<span class="rad-flexible-block-handle dashicons dashicons-ellipsis" draggable="true" title="Drag to reorder"></span>'
             . '<span class="rad-flexible-block-title">' . esc_html($layout['label']) . '</span>'
             . '<span class="rad-flexible-head-actions">'
             . '<button type="button" class="button-link rad-flexible-collapse" aria-expanded="true" title="Collapse">'
-            . '<span class="rad-flexible-collapse-icon" aria-hidden="true">&#x25BC;</span>'
+            . '<span class="rad-flexible-collapse-icon dashicons dashicons-arrow-down-alt2" aria-hidden="true"></span>'
             . '<span class="rad-flexible-collapse-label">Collapse</span>'
             . '</button> '
             . '<a href="#" class="button-link button-link-delete rad-flexible-remove">Remove</a>'
@@ -1029,9 +1579,17 @@ JS;
     // block is collapsed (or there are none).
     function updateBulkState($flexible) {
         var $blocks = $flexible.find('.rad-flexible-blocks > .rad-flexible-block');
+        var $bulk = $flexible.find('.rad-flexible-bulk');
+        // With no blocks the control is meaningless (it would read
+        // "Expand all" over an empty area), so hide it entirely.
+        if (!$blocks.length) {
+            $bulk.hide();
+            return;
+        }
+        $bulk.show();
         var anyExpanded = $blocks.filter(function () { return !$(this).hasClass('is-collapsed'); }).length > 0;
-        $flexible.find('.rad-flexible-bulk').toggleClass('is-all-collapsed', !anyExpanded);
-        $flexible.find('.rad-flexible-collapse-all-label').text(anyExpanded ? 'Collapse all' : 'Expand all');
+        $bulk.toggleClass('is-all-collapsed', !anyExpanded);
+        $bulk.find('.rad-flexible-collapse-all-label').text(anyExpanded ? 'Collapse all' : 'Expand all');
     }
 
     function readBlock($block) {
@@ -1072,13 +1630,11 @@ JS;
         });
     }
 
-    $(document).on('click', '.rad-flexible-add-btn', function (e) {
-        e.preventDefault();
-        var $wrap = $(this).closest('.rad-flexible');
-        var name = $wrap.attr('id').replace('rad-flexible-', '');
-        var $sel = $wrap.find('.rad-flexible-add-select');
-        var layout = $sel.val();
+    // Clone a blank template of `layout` and append it to the field's block
+    // list. Shared by the picker modal's card clicks.
+    function addBlock($wrap, layout) {
         if (!layout) return;
+        var name = $wrap.attr('id').replace('rad-flexible-', '');
         var safe = layout.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         var template = document.getElementById('rad-flexible-template-' + name + '-' + safe);
         if (!template) return;
@@ -1096,7 +1652,84 @@ JS;
         hydrate($wrap);
         sync($wrap);
         updateBulkState($wrap);
-        $sel.val('');
+        if ($newBlock[0].scrollIntoView) {
+            $newBlock[0].scrollIntoView({ block: 'nearest' });
+        }
+    }
+
+    // Show/hide cards matching the search term; surface the empty state when
+    // nothing matches.
+    function filterPickerCards($modal, term) {
+        term = (term || '').toLowerCase().trim();
+        var visible = 0;
+        $modal.find('.rad-flexible-card').each(function () {
+            var match = !term || ($(this).attr('data-search') || '').indexOf(term) !== -1;
+            $(this).toggle(match);
+            if (match) visible++;
+        });
+        $modal.find('.rad-flexible-modal-empty').prop('hidden', visible > 0);
+    }
+
+    function openPickerModal($wrap) {
+        // Look the modal up by id (not as a child of the wrapper) because the
+        // first open moves it to <body>, after which it is no longer a child.
+        var name = $wrap.attr('id').replace('rad-flexible-', '');
+        var $modal = $('#rad-flexible-modal-' + name);
+        if (!$modal.length) return;
+        // Move to <body> on first open so fixed positioning escapes any
+        // transformed/overflowed ancestors; document-level delegation keeps the
+        // handlers working after the move.
+        if (!$modal.data('radMoved')) {
+            $modal.appendTo(document.body);
+            $modal.data('radMoved', true);
+        }
+        $modal.data('radWrap', $wrap);
+        $modal.data('radReturnFocus', document.activeElement);
+        $modal.removeAttr('hidden');
+        document.body.classList.add('rad-flexible-modal-open');
+        var $search = $modal.find('.rad-flexible-modal-search');
+        $search.val('');
+        filterPickerCards($modal, '');
+        $search.trigger('focus');
+    }
+
+    function closePickerModal($modal) {
+        $modal.attr('hidden', 'hidden');
+        document.body.classList.remove('rad-flexible-modal-open');
+        var target = $modal.data('radReturnFocus');
+        if (target && document.body.contains(target)) {
+            target.focus();
+        }
+    }
+
+    $(document).on('click', '.rad-flexible-add-open', function (e) {
+        e.preventDefault();
+        openPickerModal($(this).closest('.rad-flexible'));
+    });
+
+    $(document).on('click', '.rad-flexible-modal-close, .rad-flexible-modal-backdrop', function () {
+        closePickerModal($(this).closest('.rad-flexible-modal'));
+    });
+
+    $(document).on('click', '.rad-flexible-card', function () {
+        var $modal = $(this).closest('.rad-flexible-modal');
+        var $wrap = $modal.data('radWrap');
+        if (!$wrap || !$wrap.closest('body').length) return;
+        addBlock($wrap, $(this).attr('data-layout'));
+        closePickerModal($modal);
+    });
+
+    $(document).on('input', '.rad-flexible-modal-search', function () {
+        filterPickerCards($(this).closest('.rad-flexible-modal'), $(this).val());
+    });
+
+    $(document).on('keydown', function (e) {
+        if (e.key !== 'Escape') return;
+        var $open = $('.rad-flexible-modal:not([hidden])');
+        if ($open.length) {
+            e.preventDefault();
+            closePickerModal($open.first());
+        }
     });
 
     $(document).on('click', '.rad-flexible-remove', function (e) {
@@ -1114,6 +1747,17 @@ JS;
     // shows). Hidden inputs stay in the DOM, so sync() still reads their values.
     $(document).on('click', '.rad-flexible-collapse', function (e) {
         e.preventDefault();
+        var $block = $(this).closest('.rad-flexible-block');
+        setBlockCollapsed($block, !$block.hasClass('is-collapsed'));
+        updateBulkState($block.closest('.rad-flexible'));
+    });
+
+    // ACF lets the whole block header toggle collapsing; clicks on the drag
+    // handle or the header's action buttons are excluded, as is a click that
+    // ends a text selection inside the title (which shouldn't collapse).
+    $(document).on('click', '.rad-flexible-block-head', function (e) {
+        if ($(e.target).closest('.rad-flexible-block-handle, .rad-flexible-collapse, .rad-flexible-remove').length) return;
+        if (window.getSelection && String(window.getSelection())) return;
         var $block = $(this).closest('.rad-flexible-block');
         setBlockCollapsed($block, !$block.hasClass('is-collapsed'));
         updateBulkState($block.closest('.rad-flexible'));
@@ -1561,6 +2205,15 @@ JS;
         });
     }
 
+    // Keep the "Row N" header numbers matching the visible order after any
+    // add/remove/reorder. Scoped to this repeater's own rows (direct children)
+    // so nested repeaters are unaffected.
+    function renumberRows($repeater) {
+        $repeater.find('.rad-companion-repeater-rows > .rad-companion-repeater-row').each(function (i) {
+            $(this).find('.rad-companion-repeater-row-number').first().text(i + 1);
+        });
+    }
+
     $(document).on('click', 'a.rad-companion-repeater-add', function (e) {
         e.preventDefault();
         var $repeater = $(this).closest('.rad-companion-repeater');
@@ -1578,6 +2231,7 @@ JS;
         }
         hydrate($repeater);
         sync($repeater);
+        renumberRows($repeater);
     });
 
     $(document).on('click', 'a.rad-companion-repeater-remove', function (e) {
@@ -1585,15 +2239,18 @@ JS;
         var $row = $(this).closest('.rad-companion-repeater-row');
         var $repeater = $row.closest('.rad-companion-repeater');
         var index = $repeater.find('.rad-companion-repeater-row').index($row) + 1;
-        if (!window.confirm('Remove row ' + index + '? This cannot be undone.')) return;
+        var noun = ($repeater.attr('data-item-label') || 'row').toLowerCase();
+        if (!window.confirm('Remove ' + noun + ' ' + index + '? This cannot be undone.')) return;
         $row.remove();
         sync($repeater);
+        renumberRows($repeater);
     });
 
     // Hydrate all repeaters on page load so media previews show correctly.
     $(document).ready(function () {
         $('.rad-companion-repeater').each(function () {
             hydrate($(this));
+            renumberRows($(this));
         });
     });
 
@@ -1622,27 +2279,73 @@ JS;
     $(document).on('dragend', '.rad-companion-repeater-row', function (e) {
         e.stopPropagation();
         this.classList.remove('dragging');
+        hideRepeaterDropLine($(this).closest('.rad-companion-repeater-rows'));
         repeaterDragType = null;
     });
+
+    // Half-position-aware placement, mirroring the flexible blocks'
+    // getDropPlacement: a drop in a row's upper half lands before it, in the
+    // lower half after it. Before this, drop only ever did insertBefore, so a
+    // downward drag always landed one row short of where it was aimed.
+    function repeaterDropPlacement(row, clientY) {
+        var rect = row.getBoundingClientRect();
+        return clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+    }
+
+    // The blue insertion line reuses the flexible drop-indicator styles. It is
+    // appended into (and removed from) the rows container, which is
+    // position:relative so offsetTop measures against it; it is removed rather
+    // than hidden so the container can still be :empty for the empty state.
+    function showRepeaterDropLine($rows, $row, placement) {
+        var $ind = $rows.children('.rad-flexible-drop-indicator');
+        if (!$ind.length) {
+            $ind = $('<div class="rad-flexible-drop-indicator"></div>');
+            $rows.append($ind);
+        }
+        var el = $row[0];
+        var top = placement === 'after' ? el.offsetTop + el.offsetHeight : el.offsetTop;
+        $ind.css('top', top + 'px');
+    }
+
+    function hideRepeaterDropLine($rows) {
+        $rows.children('.rad-flexible-drop-indicator').remove();
+    }
+
     $(document).on('dragover', '.rad-companion-repeater-row', function (e) {
         // Only allow the drop while a repeater row is the active drag.
         if (repeaterDragType !== 'rad-repeater') return;
+        var $rows = $(this).closest('.rad-companion-repeater-rows');
+        var $drag = $rows.children('.rad-companion-repeater-row.dragging');
+        // Hovering the dragged row itself is not a useful target.
+        if (!$drag.length || $drag[0] === this) {
+            hideRepeaterDropLine($rows);
+            return;
+        }
         e.preventDefault();
-        this.classList.add('drag-over');
+        e.originalEvent.dataTransfer.dropEffect = 'move';
+        showRepeaterDropLine($rows, $(this), repeaterDropPlacement(this, e.originalEvent.clientY));
     });
-    $(document).on('dragleave', '.rad-companion-repeater-row', function () { this.classList.remove('drag-over'); });
+    $(document).on('dragleave', '.rad-companion-repeater-row', function () {
+        hideRepeaterDropLine($(this).closest('.rad-companion-repeater-rows'));
+    });
     $(document).on('drop', '.rad-companion-repeater-row', function (e) {
         e.preventDefault();
-        this.classList.remove('drag-over');
         if (repeaterDragType !== 'rad-repeater') return;
         var $repeater = $(this).closest('.rad-companion-repeater');
-        var $drag = $repeater.find('> .rad-companion-repeater-rows > .rad-companion-repeater-row.dragging');
+        var $rows = $repeater.children('.rad-companion-repeater-table').children('.rad-companion-repeater-rows');
+        var $drag = $rows.children('.rad-companion-repeater-row.dragging');
+        hideRepeaterDropLine($rows);
         if ($drag.length && $drag[0] !== this) {
-            $(this).before($drag);
+            if (repeaterDropPlacement(this, e.originalEvent.clientY) === 'after') {
+                $(this).after($drag);
+            } else {
+                $(this).before($drag);
+            }
             // Re-init any WYSIWYG editors in the moved row; see the flexible drop
             // handler for why (a DOM move corrupts the editors' iframe selection).
             if (window.radReinitWysiwyg) window.radReinitWysiwyg($drag);
             sync($repeater);
+            renumberRows($repeater);
         }
     });
 
@@ -1818,17 +2521,21 @@ JS;
      * value can be rebuilt from the DOM.
      *
      * @param string $rowKey unique per-row token (e.g. "rad_repeater_0")
+     * @param int    $number  1-based row number shown in the gutter
+     * @param string $colsStyle grid-template-columns style, shared with the head
      */
-    private static function renderRepeaterRow(array $subFields, array $rowValues, string $rowKey): string
+    private static function renderRepeaterRow(array $subFields, array $rowValues, string $rowKey, int $number = 1, string $colsStyle = ''): string
     {
-        $html = '<div class="rad-companion-repeater-row" draggable="true">'
-            . '<span class="rad-companion-repeater-handle" title="Drag to reorder">&#x2807;</span>'
-            . '<a href="#" class="button-link button-link-delete rad-companion-repeater-remove" style="float:right">Remove</a>';
+        $html = '<div class="rad-companion-repeater-row" draggable="true"' . $colsStyle . '>'
+            . '<div class="rad-companion-repeater-gutter">'
+            . '<span class="rad-companion-repeater-handle dashicons dashicons-ellipsis" title="Drag to reorder"></span>'
+            . '<span class="rad-companion-repeater-row-number">' . (int) $number . '</span>'
+            . '</div>';
 
         foreach ($subFields as $sub) {
             $val = $rowValues[$sub['name']] ?? '';
             // Media sub-fields are arrays (from normalisation). Render them as a
-            // JSON {id,url,alt} string so the row's JS media picker/hydrate can
+            // JSON {id,url,alt} string so the row's media picker/hydrate can
             // parse it, matching the top-level media fields.
             if ($sub['type'] === 'media') {
                 $media = self::mediaValueToArray($val);
@@ -1840,11 +2547,14 @@ JS;
             } elseif (is_array($val)) {
                 $val = json_encode($val);
             }
+            $cellClass = 'rad-companion-repeater-cell rad-companion-repeater-cell--' . esc_attr(self::dashedSlug($sub['name']));
             $scoped = self::scopeFieldName($sub, $rowKey);
-            $html .= self::renderField($scoped, (string) $val);
+            $html .= '<div class="' . $cellClass . '">' . self::renderField($scoped, (string) $val) . '</div>';
         }
 
-        $html .= '</div>';
+        $html .= '<div class="rad-companion-repeater-actions">'
+            . '<a href="#" class="button-link button-link-delete rad-companion-repeater-remove" title="Remove row" aria-label="Remove row"><span class="dashicons dashicons-no-alt" aria-hidden="true"></span></a>'
+            . '</div></div>';
 
         return $html;
     }
