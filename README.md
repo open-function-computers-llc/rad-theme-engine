@@ -34,13 +34,17 @@ And that's it! Read about advanced installations and asset bundling on [the docs
 Themes define admin edit fields in yml files next to their templates (e.g. `tpl-flexible.yml`, `single-<post-type>.yml`). Flexible fields render a modal slice picker, and repeaters render as sortable tables. Beyond the standard field keys, layout definitions support:
 
 ```yaml
-layouts:
-  Hero:
-    title: Hero
-    description: Full-width headline with a background image and one button.
-    thumbnail: hero            # assets/hero.png
-    fields:
-      headline: { type: text, required: true }
+# tpl-flexible.yml
+fields:
+  content:
+    type: flexible
+    layouts:
+      Hero:
+        title: Hero
+        description: Full-width headline with a background image and one button.
+        thumbnail: hero        # assets/hero.png
+        fields:
+          headline: { type: text, required: true }
 ```
 
 - **`description:`** — shown under the layout name in the slice picker modal.
@@ -51,10 +55,12 @@ layouts:
 Repeater rows are added with a plain **"Add Row"** button. Set the label explicitly in the yml — there is no automatic singularisation of the field label:
 
 ```yaml
-features:
-  type: repeater
-  label: Features
-  add button text: Add Feature
+# tpl-flexible.yml
+fields:
+  features:
+    type: repeater
+    label: Features
+    add button text: Add Feature
 ```
 
 ### Sharing layouts with `imports:`

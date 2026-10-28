@@ -17,8 +17,9 @@ class CompanionFields
 {
     /**
      * Field types that are rendered natively as form inputs.
-     * Anything else is deferred (see $UNIMPLEMENTED) so unknown types are
-     * surfaced instead of silently dropped.
+     * Anything else renders a visible placeholder (see $UNIMPLEMENTED for
+     * types recognised by the format but not yet implemented), so unknown
+     * types are surfaced instead of silently dropped.
      */
     public const SUPPORTED = [
         'text', 'email', 'number', 'tel', 'url', 'password',
@@ -740,14 +741,14 @@ class CompanionFields
      */
     public static function renderBox(string $boxId, string $template, array $fields, array $values = []): string
     {
-        $fieldsHtml = '';
+        $fieldsHtml = [];
         foreach ($fields as $field) {
-            $fieldsHtml .= self::renderField($field, $values[$field['name']] ?? '');
+            $fieldsHtml[] = self::renderField($field, $values[$field['name']] ?? '');
         }
 
         return FieldTemplates::render('box', [
             'nonce' => wp_nonce_field('rad_companion_' . self::slug($template), 'rad_companion_nonce', true, false),
-            'fields' => $fieldsHtml,
+            'fields' => implode('', $fieldsHtml),
         ]);
     }
 
@@ -879,16 +880,20 @@ class CompanionFields
                 $control = self::renderWysiwygField($field, $value, $id);
                 break;
 
-            default:
-                if (self::unimplemented($type)) {
-                    $control = FieldTemplates::render('unimplemented', ['type' => $type]);
-                    break;
-                }
-
-                // All single-line input types (text, email, number, url, ...)
-                $typeAttr = in_array($type, self::SUPPORTED, true) ? $type : 'text';
+            // All single-line input types (text, email, number, url, ...)
+            case 'text':
+            case 'email':
+            case 'number':
+            case 'tel':
+            case 'url':
+            case 'password':
+            case 'date':
+            case 'datetime-local':
+            case 'time':
+            case 'week':
+            case 'month':
                 $control = FieldTemplates::render('input', [
-                    'type' => $typeAttr,
+                    'type' => $type,
                     'id' => $id,
                     'name' => $id,
                     'required' => $required,
@@ -896,6 +901,10 @@ class CompanionFields
                     'hasPlaceholder' => isset($field['placeholder']),
                     'placeholder' => isset($field['placeholder']) ? (string) $field['placeholder'] : '',
                 ]);
+                break;
+
+            default:
+                $control = FieldTemplates::render('unimplemented', ['type' => $type]);
                 break;
         }
 
@@ -1064,9 +1073,9 @@ class CompanionFields
         // JS name-matching regex simple.
         $blankRow = self::renderRepeaterRow($subFields, [], 'blank', 1, $colsStyle);
 
-        $existingRows = '';
+        $existingRows = [];
         foreach ($rows as $i => $row) {
-            $existingRows .= self::renderRepeaterRow($subFields, $row, 'row-' . $i, $i + 1, $colsStyle);
+            $existingRows[] = self::renderRepeaterRow($subFields, $row, 'row-' . $i, $i + 1, $colsStyle);
         }
 
         // The top-level hidden input carries the normalised rows as JSON so the
@@ -1081,7 +1090,7 @@ class CompanionFields
             'json' => $inputValue,
             'blankRow' => $blankRow,
             'head' => $head,
-            'rows' => $existingRows,
+            'rows' => implode('', $existingRows),
             'addText' => $addText,
             'script' => self::repeaterScript(),
         ]);
@@ -1125,23 +1134,23 @@ class CompanionFields
         }
 
         // One hidden template per layout so the JS can clone a fresh block.
-        $templates = '';
+        $templates = [];
         foreach ($layouts as $layoutName => $layout) {
             $safe = self::dashedSlug($layoutName);
-            $templates .= FieldTemplates::render('flexible-template', [
+            $templates[] = FieldTemplates::render('flexible-template', [
                 'fieldName' => $field['name'],
                 'safe' => $safe,
                 'block' => self::renderFlexibleBlock($layout, [], 'blank-' . $safe),
             ]);
         }
 
-        $existing = '';
+        $existing = [];
         foreach ($blocks as $i => $block) {
             $layout = self::findFlexibleLayout($field, (string) $block['_layout']);
             if (!$layout) {
                 continue;
             }
-            $existing .= self::renderFlexibleBlock($layout, $block, 'block-' . $i);
+            $existing[] = self::renderFlexibleBlock($layout, $block, 'block-' . $i);
         }
 
         // Top-level hidden input carries the normalised blocks as JSON for the
@@ -1172,10 +1181,10 @@ class CompanionFields
             'name' => $id,
             'json' => $inputValue,
             'notices' => $notices,
-            'templates' => $templates,
+            'templates' => implode('', $templates),
             'bulkTop' => $collapseAll('top'),
             'bulkBottom' => $collapseAll('bottom'),
-            'blocks' => $existing,
+            'blocks' => implode('', $existing),
             'selector' => FieldTemplates::render('flexible-add', [
                 'modal' => self::flexiblePickerModal($field, $layouts),
             ]),
@@ -1193,7 +1202,7 @@ class CompanionFields
      */
     private static function flexiblePickerModal(array $field, array $layouts): string
     {
-        $cards = '';
+        $cards = [];
         foreach ($layouts as $layoutName => $layout) {
             $thumbnail = isset($layout['thumbnail']) ? (string) $layout['thumbnail'] : '';
             $description = isset($layout['description']) ? (string) $layout['description'] : '';
@@ -1203,7 +1212,7 @@ class CompanionFields
                 ? '<img class="rad-flexible-card-img" src="' . esc_url($thumbnail) . '" alt="" loading="lazy" />'
                 : '<span class="rad-flexible-card-img--empty" aria-hidden="true"></span>';
 
-            $cards .= FieldTemplates::render('flexible-card', [
+            $cards[] = FieldTemplates::render('flexible-card', [
                 'layoutName' => $layoutName,
                 'search' => $search,
                 'media' => $media,
@@ -1214,7 +1223,7 @@ class CompanionFields
 
         return FieldTemplates::render('flexible-modal', [
             'fieldName' => $field['name'],
-            'cards' => $cards,
+            'cards' => implode('', $cards),
         ]);
     }
 
@@ -1229,7 +1238,7 @@ class CompanionFields
      */
     private static function renderFlexibleBlock(array $layout, array $values, string $blockKey): string
     {
-        $fieldsHtml = '';
+        $fieldsHtml = [];
         foreach ($layout['fields'] as $sub) {
             $val = $values[$sub['name']] ?? '';
             if ($sub['type'] === 'media') {
@@ -1243,13 +1252,13 @@ class CompanionFields
                 $val = json_encode($val);
             }
             $scoped = self::scopeFieldName($sub, $blockKey);
-            $fieldsHtml .= self::renderField($scoped, (string) $val);
+            $fieldsHtml[] = self::renderField($scoped, (string) $val);
         }
 
         // Informational layouts (no fields) show their message instead.
         $body = !empty($layout['message']) && empty($layout['fields'])
             ? FieldTemplates::render('flexible-message', ['message' => (string) $layout['message']])
-            : $fieldsHtml;
+            : implode('', $fieldsHtml);
 
         return FieldTemplates::render('flexible-block', [
             'layoutName' => $layout['name'],
@@ -1306,7 +1315,7 @@ class CompanionFields
      */
     private static function renderRepeaterRow(array $subFields, array $rowValues, string $rowKey, int $number = 1, string $colsStyle = ''): string
     {
-        $cells = '';
+        $cells = [];
         foreach ($subFields as $sub) {
             $val = $rowValues[$sub['name']] ?? '';
             // Media sub-fields are arrays (from normalisation). Render them as a
@@ -1322,7 +1331,7 @@ class CompanionFields
             } elseif (is_array($val)) {
                 $val = json_encode($val);
             }
-            $cells .= FieldTemplates::render('repeater-cell', [
+            $cells[] = FieldTemplates::render('repeater-cell', [
                 'class' => 'rad-companion-repeater-cell rad-companion-repeater-cell--' . self::dashedSlug($sub['name']),
                 'html' => self::renderField(self::scopeFieldName($sub, $rowKey), (string) $val),
             ]);
@@ -1331,7 +1340,7 @@ class CompanionFields
         return FieldTemplates::render('repeater-row', [
             'colsAttr' => $colsStyle,
             'number' => $number,
-            'cells' => $cells,
+            'cells' => implode('', $cells),
         ]);
     }
 
@@ -1345,14 +1354,6 @@ class CompanionFields
         $scoped = $sub;
         $scoped['name'] = $rowKey . '[' . $sub['name'] . ']';
         return $scoped;
-    }
-
-    /**
-     * @return bool
-     */
-    private static function unimplemented(string $type): bool
-    {
-        return in_array($type, self::UNIMPLEMENTED, true);
     }
 
     /**

@@ -278,4 +278,14 @@ class CompanionFieldsTest extends RadTestCase
 
         $this->assertStringContainsString('file fields are not implemented yet.', $html);
     }
+
+    /** @test */
+    public function unknownTypesRenderAPlaceholderInsteadOfATextInput()
+    {
+        $field = CompanionFields::normalizeField('swatch', ['type' => 'color', 'label' => 'Swatch']);
+        $html = CompanionFields::renderField($field);
+
+        $this->assertStringContainsString('color fields are not implemented yet.', $html);
+        $this->assertStringNotContainsString('<input', $html);
+    }
 }
