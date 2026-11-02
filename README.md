@@ -29,6 +29,59 @@ npm install
 
 And that's it! Read about advanced installations and asset bundling on [the docs](https://rad-theme-engine.ofco.cloud/).
 
+## Companion Fields
+
+Themes define admin edit fields in yml files next to their templates (e.g. `tpl-flexible.yml`, `single-<post-type>.yml`). Flexible fields render a modal slice picker, and repeaters render as sortable tables. Beyond the standard field keys, layout definitions support:
+
+```yaml
+# tpl-flexible.yml
+fields:
+  content:
+    type: flexible
+    layouts:
+      Hero:
+        title: Hero
+        description: Full-width headline with a background image and one button.
+        thumbnail: hero        # assets/hero.png
+        fields:
+          headline: { type: text, required: true }
+```
+
+- **`description:`** — shown under the layout name in the slice picker modal.
+- **`thumbnail:`** — 16:9 preview image (1280×720 recommended) in the picker. A bare filename resolves inside the theme's `assets/` directory; a value containing a slash is relative to the theme root (so a dedicated folder is explicit: `assets/thumbnails/hero`). The extension may be omitted and is resolved in this order: png, jpg, jpeg, webp, svg, gif.
+
+### Repeaters
+
+Repeater rows are added with a plain **"Add Row"** button. Set the label explicitly in the yml — there is no automatic singularisation of the field label:
+
+```yaml
+# tpl-flexible.yml
+fields:
+  features:
+    type: repeater
+    label: Features
+    add button text: Add Feature
+```
+
+### Sharing layouts with `imports:`
+
+Repeated slice definitions can live once in a shared file (e.g. `slices/base.yml` with a top-level `layouts:` map) and be pulled into any companion yml. `imports:` is only valid at the **top** of the file — never inside a field definition — and when it's present a flexible field needs no layouts (or even a definition body) below it unless it adds or overrides layouts of its own:
+
+```yaml
+# single-service-area.yml
+imports: slices/base.yml      # or a list of paths
+fields:
+  content: flexible           # all layouts come from the import
+  other:
+    type: flexible
+    layouts:
+      Intro: { ... }          # local layouts win over imported ones of the same name
+```
+
+Imported layouts load first; a local layout with the same key replaces the imported one in place. Paths are relative to the theme root (imports outside the theme are rejected), imports may nest, cycles are detected, and resolution errors are shown inline on the field instead of failing silently.
+
+Collapsed flexible slices stay collapsed: collapse state is stored per post + field + block in the browser's localStorage and restored on the next edit.
+
 ## Local Development & Testing
 
 This section is for contributors who want to work on `rad-theme-engine` itself with a full TDD setup.
