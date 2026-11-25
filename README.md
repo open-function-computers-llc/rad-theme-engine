@@ -63,6 +63,38 @@ fields:
     add button text: Add Feature
 ```
 
+### Conditional fields with `show_if:`
+
+A field can be shown only while a sibling `select`, `radio` or `checkbox` holds a given value. The controlling field must be in the same scope: the same meta box, repeater row or flexible block.
+
+```yaml
+fields:
+  cta_type:
+    type: radio            # radio buttons; options work like select
+    options: [None, Link, File]
+  cta_url:
+    type: url
+    show_if: { field: cta_type, value: Link }
+  cta_file:
+    type: media
+    filetypes: documents
+    show_if: { field: cta_type, value: [File] }   # a list means "any of"
+  has_left_wysiwyg: checkbox
+  left_wysiwyg:
+    type: wysiwyg
+    show_if: has_left_wysiwyg                     # shorthand: checkbox is ticked
+```
+
+`show_if: { has_left_wysiwyg: false }` is also accepted (`true`/`false` match a checkbox's ticked/unticked state). Hidden fields keep their values when saved, and a hidden `required` field doesn't block saving. If the controlling field can't be found, the field stays visible.
+
+### Media previews
+
+A media field shows what's been picked. Images show as the image. A PDF or other file shows its first page with the filename underneath. It uses the thumbnail WordPress makes on upload when the server has Imagick + Ghostscript, and otherwise shows the PDF itself in the browser's built-in viewer. Other files (video, Office…) show the file-type icon and filename. A theme that makes its own PDF thumbnails can add them to the `sizes` returned by the `wp_prepare_attachment_for_js` filter, and the field will use them.
+
+### URL fields
+
+`type: url` takes absolute URLs, relative paths (`/contact`), anchors (`#form`), `mailto:`/`tel:` links and bare domains. A bare domain (`www.example.com`) is saved with `https://` added.
+
 ### Sharing layouts with `imports:`
 
 Repeated slice definitions can live once in a shared file (e.g. `slices/base.yml` with a top-level `layouts:` map) and be pulled into any companion yml. `imports:` is only valid at the **top** of the file — never inside a field definition — and when it's present a flexible field needs no layouts (or even a definition body) below it unless it adds or overrides layouts of its own:
@@ -81,6 +113,36 @@ fields:
 Imported layouts load first; a local layout with the same key replaces the imported one in place. Paths are relative to the theme root (imports outside the theme are rejected), imports may nest, cycles are detected, and resolution errors are shown inline on the field instead of failing silently.
 
 Collapsed flexible slices stay collapsed: collapse state is stored per post + field + block in the browser's localStorage and restored on the next edit.
+
+## Taxonomy Term Fields
+
+Term edit screens get their fields from yml files too. Two locations are supported, checked in this order:
+
+1. `taxonomy-<slug>.yml` at the theme root. A matching `taxonomy-<slug>.php` is optional — put one next to the yml if you're also rendering a custom archive template (WordPress's template hierarchy handles that), but fields work fine without it.
+2. `taxonomies/<slug>.yml` inside a folder at the theme root, for themes that prefer to group field declarations together.
+
+If both exist for the same taxonomy, the root-level companion wins.
+
+```yaml
+# taxonomies/room-type.yml
+fields:
+  description: textarea
+  icon: media
+  features:
+    type: repeater
+    fields:
+      label: text
+```
+
+Fields render inside WordPress's Add Term / Edit Term screens. Values are stored as term meta keyed `rad_<name>` — same `rad_` prefix and serialisation used by post fields — so media, repeaters and flexible fields behave identically to their post-side counterparts.
+
+In templates:
+
+```php
+$fields = \ofc\TaxonomyFields::resolveAll('room-type', $term);
+// or one field:
+$desc  = \ofc\TaxonomyFields::resolveField('room-type', 'description', $term);
+```
 
 ## Local Development & Testing
 

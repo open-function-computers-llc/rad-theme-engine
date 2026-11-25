@@ -35,6 +35,98 @@ class SiteConfigTest extends RadTestCase
     }
 
     /** @test */
+    public function taxonomiesDefaultToNonHierarchicalWhenNoOptionsAreSupplied()
+    {
+        Site::getInstance([
+            "handlebars" => false,
+            "custom-post-types" => [
+                [
+                    "slug" => "legacy_book",
+                    "taxonomies" => "genre",
+                ],
+            ],
+        ]);
+
+        do_action('init');
+
+        $tax = get_taxonomy('genre');
+        $this->assertNotFalse($tax, 'Legacy string-form taxonomies should still register.');
+        $this->assertFalse($tax->hierarchical);
+    }
+
+    /** @test */
+    public function listFormTaxonomiesStillRegisterAndDefaultToNonHierarchical()
+    {
+        Site::getInstance([
+            "handlebars" => false,
+            "custom-post-types" => [
+                [
+                    "slug" => "list_book",
+                    "taxonomies" => ["list_genre", "list_format"],
+                ],
+            ],
+        ]);
+
+        do_action('init');
+
+        foreach (['list_genre', 'list_format'] as $tax) {
+            $obj = get_taxonomy($tax);
+            $this->assertNotFalse($obj, "$tax should register from the list form.");
+            $this->assertFalse($obj->hierarchical);
+        }
+    }
+
+    /** @test */
+    public function hierarchicalTaxonomyCanBeRequestedViaTheMapForm()
+    {
+        Site::getInstance([
+            "handlebars" => false,
+            "custom-post-types" => [
+                [
+                    "slug" => "hier_book",
+                    "taxonomies" => [
+                        "hier_genre" => ['hierarchical' => true],
+                    ],
+                ],
+            ],
+        ]);
+
+        do_action('init');
+
+        $tax = get_taxonomy('hier_genre');
+        $this->assertNotFalse($tax);
+        $this->assertTrue($tax->hierarchical, 'hierarchical => true should reach register_taxonomy.');
+    }
+
+    /** @test */
+    public function extraTaxonomyOptionsAreForwardedToRegisterTaxonomy()
+    {
+        Site::getInstance([
+            "handlebars" => false,
+            "custom-post-types" => [
+                [
+                    "slug" => "extra_book",
+                    "taxonomies" => [
+                        "extra_genre" => [
+                            'hierarchical' => true,
+                            'show_in_rest' => true,
+                            'show_admin_column' => true,
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        do_action('init');
+
+        $tax = get_taxonomy('extra_genre');
+        $this->assertNotFalse($tax);
+        $this->assertTrue($tax->hierarchical);
+        $this->assertTrue($tax->show_in_rest, 'show_in_rest should pass through from the yml options.');
+        $this->assertTrue($tax->show_admin_column, 'show_admin_column should pass through from the yml options.');
+    }
+
+    /** @test */
     public function weCanRegisterMenuLocationsViaConfig()
     {
         Site::getInstance([

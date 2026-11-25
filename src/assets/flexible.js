@@ -113,10 +113,12 @@
         flushWysiwyg();
         var o = {};
         o._layout = $block.find('input.rad-flexible-layout').val() || '';
-        $block.find('input[type=hidden],input[type=text],input[type=email],input[type=number],input[type=url],input[type=password],input[type=date],input[type=datetime-local],input[type=time],input[type=week],input[type=month],input[type=checkbox],textarea,select').each(function () {
+        $block.find('input[type=hidden],input[type=text],input[type=email],input[type=tel],input[type=number],input[type=url],input[type=password],input[type=date],input[type=datetime-local],input[type=time],input[type=week],input[type=month],input[type=checkbox],input[type=radio],textarea,select').each(function () {
             // Input names render as rad_<blockKey>[<sub>], e.g. rad_block-0[title]
             var m = this.name.match(/^rad_(?:blank[-\w]+|block-\d+)\[([\w\-]+)\]$/);
             if (!m) return;
+            // Only the selected radio in a group carries the value.
+            if (this.type === 'radio' && !this.checked) return;
             // Checkboxes report their state via `.checked`, not `.value`.
             o[m[1]] = (this.type === 'checkbox') ? (this.checked ? this.value : '') : this.value;
         });
@@ -133,22 +135,49 @@
         input.val(JSON.stringify(a));
     }
 
-    function hydrate($flexible) {
-        $flexible.find('.rad-companion-media').each(function () {
+function hydrate($scope) {
+        // Re-draw media previews in freshly cloned rows/blocks from their hidden
+        // JSON. Uses the shared, type-aware renderer from media.js so a PDF or
+        // other document keeps its filename tile instead of becoming a broken
+        // (blank) <img>. Only previews out of step with their input are
+        // touched, so existing rows keep their server-rendered previews.
+        $scope.find('.rad-companion-media').each(function () {
             var el = $(this);
-            var input = el.find('input[type=hidden]');
+            var input = el.children('input[type=hidden]');
             var cur = {};
             try { cur = JSON.parse(input.val() || '{}'); } catch (e) { cur = {}; }
-            var preview = el.find('.rad-companion-media-preview');
-            preview.removeAttr('data-id').attr('data-id', cur.id || '');
-            preview.html(cur.url
-                ? '<img class="rad-companion-media-img" src="' + cur.url + '" alt="' + (cur.alt || '') + '" />'
-                : '<p class="description">No media selected.</p>');
+            var preview = el.children('.rad-companion-media-preview');
+            if (String(preview.attr('data-id') || '') === String(cur.id || '') && preview.children().length) return;
+            if (window.radRenderMedia) {
+                window.radRenderMedia(el, cur.id || '', cur.url || '', cur.alt || '', el.attr('data-attachment-type') || 'unknown');
+                return;
+            }
+            preview.attr('data-id', cur.id || '');
+            if (!cur.url) preview.html('<p class="description">No media selected.</p>');
         });
     }
 
+    function refresh(scope) {
+        var $scope = scope ? $(scope) : $(document);
+        $scope.find('.rad-flexible').each(function () {
+            var $flexible = $(this);
+            applyState($flexible);
+            updateBulkState($flexible);
+
+            if (window.radRefreshMedia) {
+                window.radRefreshMedia($flexible);
+            } else {
+                hydrate($flexible);
+            }
+        });
+    }
+
+    window.radRefreshFlexible = refresh;
+
     // Clone a blank template of `layout` and append it to the field's block
     // list. Shared by the picker modal's card clicks.
+    var blockSeq = 0;
+
     function addBlock($wrap, layout) {
         if (!layout) return;
         var name = $wrap.attr('id').replace('rad-flexible-', '');
@@ -162,11 +191,13 @@
         // `blank-<layout>` key) to a unique `block-N` so input names stay unique
         // and any nested wysiwyg editor gets re-targeted + initialised.
         var $newBlock = $blocks.children().last();
-        var newKey = 'block-' + $blocks.children().length;
+        // Unique for the life of the page (a count-based key repeats after a
+        // block is removed, colliding radio groups / TinyMCE editor ids).
+        var newKey = 'block-' + Date.now() + (++blockSeq);
         if (window.radRekeyRow) {
             window.radRekeyRow($newBlock, 'blank-' + safe, newKey);
         }
-        hydrate($wrap);
+        hydrate($newBlock);
         sync($wrap);
         updateBulkState($wrap);
         if ($newBlock[0].scrollIntoView) {
@@ -296,11 +327,7 @@
     });
 
     $(document).ready(function () {
-        $('.rad-flexible').each(function () {
-            hydrate($(this));
-            applyState($(this));
-            updateBulkState($(this));
-        });
+        refresh(document);
     });
 
     $(document).on('change input', '.rad-flexible-blocks input, .rad-flexible-blocks textarea, .rad-flexible-blocks select', function () {

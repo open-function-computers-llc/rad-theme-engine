@@ -135,4 +135,108 @@ class SiteDisableTest extends RadTestCase
         // verify admin_init hook was registered for submenu cleanup
         $this->assertGreaterThan(0, has_action("admin_init"));
     }
+
+    /** @test */
+    public function weCanDisableFonts()
+    {
+        Site::getInstance([
+            "handlebars" => false,
+            "disable" => ["fonts"],
+        ]);
+
+        $this->assertGreaterThan(0, has_action("admin_init"));
+    }
+
+    /** @test */
+    public function disablingFontsRemovesTheAppearanceFontsSubmenu()
+    {
+        global $submenu;
+        $backup = isset($submenu['themes.php']) ? $submenu['themes.php'] : [];
+
+        // Mirror wp-admin/menu.php's Font Library registration so we can see
+        // the disable hook actually strip it (see wp-admin/menu.php in core).
+        $submenu['themes.php'][9] = array('Fonts', 'edit_theme_options', 'font-library.php');
+
+        // Isolate the fonts-disable behaviour. Firing the global admin_init also
+        // runs core's own callbacks which, outside a real wp-admin request, call
+        // header() and _doing_it_wrong('wp_add_privacy_policy_content', …) — both
+        // of which the CLI test harness turns into an error. Drop every
+        // registered admin_init callback, then boot Site (which re-adds only the
+        // fonts removal on admin_init) and fire it so just our closure runs.
+        // WP_UnitTestCase backs up/restores $wp_filter, so the wipe is contained.
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+        remove_all_actions('admin_init');
+
+        Site::getInstance([
+            "handlebars" => false,
+            "disable" => ["fonts"],
+        ]);
+
+        do_action('admin_init');
+
+        $slugs = array_column(isset($submenu['themes.php']) ? $submenu['themes.php'] : [], 2);
+        $this->assertNotContains('font-library.php', $slugs);
+
+        $submenu['themes.php'] = $backup;
+    }
+
+    /** @test */
+    public function weCanDisableComments()
+    {
+        Site::getInstance([
+            "handlebars" => false,
+            "disable" => ["comments"],
+        ]);
+
+        // Comments_open should be forced closed.
+        $this->assertFalse(apply_filters('comments_open', true, 1));
+        $this->assertFalse(apply_filters('pings_open', true, 1));
+    }
+
+    /** @test */
+    public function disablingCommentsStripsCommentSupportFromEveryRegisteredPostType()
+    {
+        // Register a CPT in the SAME bootstrap call as the disable so the init
+        // hook has a non-core post type to strip support off of (Site is a
+        // singleton — a second getInstance() would be a no-op).
+        Site::getInstance([
+            "handlebars" => false,
+            "custom-post-types" => [
+                ["slug" => "comment_test_cpt"],
+            ],
+            "disable" => ["comments"],
+        ]);
+
+        do_action('init');
+
+        foreach (['post', 'page', 'comment_test_cpt'] as $type) {
+            $this->assertFalse(
+                post_type_supports($type, 'comments'),
+                "$type should not declare comment support after disable=comments."
+            );
+        }
+    }
+
+    /** @test */
+    public function disablingCommentsRemovesTheCommentsAdminMenuEntry()
+    {
+        global $menu;
+        $backup = isset($menu) ? $menu : [];
+
+        // Mirror what wp-admin/menu.php installs so we can see the disable hook
+        // actually pull it back out (see wp-admin/menu.php in core).
+        $menu[25] = array('Comments', 'edit_posts', 'edit-comments.php');
+
+        Site::getInstance([
+            "handlebars" => false,
+            "disable" => ["comments"],
+        ]);
+
+        do_action('admin_menu');
+
+        $slugs = array_column($menu, 2);
+        $this->assertNotContains('edit-comments.php', $slugs);
+
+        $menu = $backup;
+    }
 }

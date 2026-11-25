@@ -120,12 +120,17 @@ class RadThemeEngine
     /**
      * Resolve a companion-YAML site option in a template, mirroring acfOption.
      *
-     *   {{#radOption primary_phone}}                    -> single configured page
-     *   {{#radOption site-settings primary_phone}}      -> explicit page + field
-     *   {{#radOption site-settings}}                    -> whole page as a map
+     *   {{#radOption primary_phone}}                        -> single configured page
+     *   {{#radOption site-settings primary_phone}}          -> explicit page + field
+     *   {{#radOption site-settings}}                        -> whole page as a map
+     *   {{#radOption product_guide.url}}                    -> sub-path into a
+     *                                                          structured field
+     *   {{#radOption papers-cpt product_guide.url}}         -> page + sub-path
      *
      * The first arg is the options page name (as named in config `options-pages`),
-     * the second (optional) is the field name.
+     * the second (optional) is the field name. Either can use dotted paths to
+     * reach inside a resolved value (e.g. `product_guide.url` on a media field
+     * with `output: object`).
      */
     public static function radOption()
     {

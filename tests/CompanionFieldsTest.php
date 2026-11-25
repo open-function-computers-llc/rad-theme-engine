@@ -44,7 +44,18 @@ class CompanionFieldsTest extends RadTestCase
     {
         $reflection = new ReflectionClass(CompanionFields::class);
 
-        foreach (['importErrors' => [], 'adminStylesPrinted' => false] as $property => $value) {
+        $defaults = [
+            'importErrors' => [],
+            'adminStylesPrinted' => false,
+            'renderedEditors' => [],
+            'previewConfigPrinted' => false,
+            'seededGroups' => [],
+            'previewStylesPrinted' => false,
+            'rowSeq' => 0,
+            'blockSeq' => 0,
+        ];
+
+        foreach ($defaults as $property => $value) {
             $prop = $reflection->getProperty($property);
             $prop->setAccessible(true);
             $prop->setValue(null, $value);
@@ -287,5 +298,478 @@ class CompanionFieldsTest extends RadTestCase
 
         $this->assertStringContainsString('color fields are not implemented yet.', $html);
         $this->assertStringNotContainsString('<input', $html);
+    }
+
+    /** @test */
+    public function sidebarFieldsAreParsedIntoTheirOwnListAlongsideRegularFields()
+    {
+        $path = $this->themeFile(
+            'rad-test-sidebar-group.yml',
+            "fields:\n  content: text\nsidebar_fields:\n  featured_document: media\n  menu_paragraph: textarea\n"
+        );
+
+        $method = new ReflectionMethod(CompanionFields::class, 'groupFromYml');
+        $method->setAccessible(true);
+        $group = $method->invoke(null, $path, 'rad-test-sidebar-group', 'Test', null);
+
+        $this->assertNotNull($group);
+        $this->assertSame(['content'], array_column($group['fields'], 'name'));
+        $this->assertSame(
+            ['featured_document', 'menu_paragraph'],
+            array_column($group['sidebar_fields'], 'name')
+        );
+        $this->assertSame('media', $group['sidebar_fields'][0]['type']);
+        $this->assertSame('textarea', $group['sidebar_fields'][1]['type']);
+        // Labels are derived from the field name the same way as regular fields.
+        $this->assertSame('Featured Document', $group['sidebar_fields'][0]['label']);
+    }
+
+    /** @test */
+    public function sidebarOnlyYmlStillProducesAGroupWithNoMainFields()
+    {
+        $path = $this->themeFile(
+            'rad-test-sidebar-only.yml',
+            "sidebar_fields:\n  featured_document: media\n"
+        );
+
+        $method = new ReflectionMethod(CompanionFields::class, 'groupFromYml');
+        $method->setAccessible(true);
+        $group = $method->invoke(null, $path, 'rad-test-sidebar-only', 'Test', null);
+
+        $this->assertNotNull($group);
+        $this->assertSame([], $group['fields']);
+        $this->assertSame(['featured_document'], array_column($group['sidebar_fields'], 'name'));
+    }
+
+    /** @test */
+    public function ymlWithNeitherFieldsNorSidebarFieldsProducesNoGroup()
+    {
+        $path = $this->themeFile('rad-test-no-fields.yml', "hidden: content\n");
+
+        $method = new ReflectionMethod(CompanionFields::class, 'groupFromYml');
+        $method->setAccessible(true);
+
+        $this->assertNull($method->invoke(null, $path, 'rad-test-no-fields', 'Test', null));
+    }
+
+    /** @test */
+    public function sidebarFieldsRenderThroughTheSameFieldRendererAsRegularFields()
+    {
+        $sidebar = [
+            CompanionFields::normalizeField('menu_paragraph', 'textarea'),
+        ];
+
+        $html = CompanionFields::renderBox('rad_companion_tpl-flexible_sidebar', 'tpl-flexible.php', $sidebar, [
+            'menu_paragraph' => 'Hello sidebar',
+        ]);
+
+        // Same box chrome + same field markup as the main-column box.
+        $this->assertStringContainsString('rad-companion-fields', $html);
+        $this->assertStringContainsString('name="rad_menu_paragraph"', $html);
+        $this->assertStringContainsString('Hello sidebar', $html);
+        $this->assertStringContainsString('rad_companion_nonce', $html);
+    }
+
+    /** @test */
+    public function mediaFiletypesDefaultsToImageAndAcceptsNamedCategories()
+    {
+        // Bare `media` (no filetypes:) stays on the existing image picker.
+        $bare = CompanionFields::normalizeField('hero', 'media');
+        $this->assertSame('image', $bare['filetypes'] ?? 'image');
+
+        foreach (['image', 'videos', 'documents', 'all'] as $kind) {
+            $field = CompanionFields::normalizeField('doc', ['type' => 'media', 'filetypes' => $kind]);
+            $this->assertSame($kind, $field['filetypes']);
+        }
+
+        // Unknown values fall back to image so a typo never opens the whole library.
+        $typo = CompanionFields::normalizeField('doc', ['type' => 'media', 'filetypes' => 'pdfs']);
+        $this->assertSame('image', $typo['filetypes']);
+    }
+
+    /** @test */
+    public function mediaFieldHtmlCarriesFiletypesAndAttachmentTypeAttributes()
+    {
+        $field = CompanionFields::normalizeField('featured_document', [
+            'type' => 'media',
+            'filetypes' => 'documents',
+        ]);
+
+        $html = CompanionFields::renderField($field, serialize(['id' => 0, 'url' => '', 'alt' => '']));
+
+        $this->assertStringContainsString('data-filetypes="documents"', $html);
+        // No stored attachment -> unknown type (server doesn't render a tile/img).
+        $this->assertStringContainsString('data-attachment-type="unknown"', $html);
+        $this->assertStringContainsString('No media selected.', $html);
+    }
+
+    /**
+     * renderField() inlines the companion stylesheet + media.js, which embed the
+     * class names of EVERY preview variant as string literals. Strip those asset
+     * blocks so a media preview test can assert on the server-rendered markup
+     * (and its absence of the other variants) without the inlined JS/CSS
+     * defeating the assertStringNotContainsString checks.
+     */
+    private function fieldMarkupWithoutAssets(string $html): string
+    {
+        $html = preg_replace('#<script\b[^>]*>.*?</script>#is', '', $html);
+        $html = preg_replace('#<style\b[^>]*>.*?</style>#is', '', $html);
+        return $html;
+    }
+
+    /** @test */
+    public function storedNonImageMediaRendersFilenameTileInsteadOfBrokenImg()
+    {
+        $field = CompanionFields::normalizeField('featured_document', [
+            'type' => 'media',
+            'filetypes' => 'documents',
+            'output' => 'url',
+        ]);
+
+        $stored = serialize([
+            'id' => 0,
+            'url' => 'https://example.com/wp-content/uploads/2026/11/menu.pdf',
+            'alt' => '',
+        ]);
+
+        $html = $this->fieldMarkupWithoutAssets(CompanionFields::renderField($field, $stored));
+
+        // The wrapper is tagged as an application/* attachment …
+        $this->assertStringContainsString('data-attachment-type="application"', $html);
+        // … and with no generated thumbnail the PDF previews in the browser's
+        // own viewer, captioned with its filename — never a broken <img>.
+        $this->assertStringContainsString('<figure class="rad-companion-media-doc">', $html);
+        $this->assertStringContainsString('<iframe src="https://example.com/wp-content/uploads/2026/11/menu.pdf#toolbar=0', $html);
+        $this->assertStringContainsString('menu.pdf</figcaption>', $html);
+        $this->assertStringNotContainsString('<img class="rad-companion-media-img"', $html);
+    }
+
+    /** @test */
+    public function storedNonPdfDocumentRendersFilenameTile()
+    {
+        $field = CompanionFields::normalizeField('handbook', [
+            'type' => 'media',
+            'filetypes' => 'documents',
+        ]);
+
+        $stored = serialize([
+            'id' => 0,
+            'url' => 'https://example.com/wp-content/uploads/2026/11/handbook.docx',
+            'alt' => '',
+        ]);
+
+        $html = $this->fieldMarkupWithoutAssets(CompanionFields::renderField($field, $stored));
+
+        $this->assertStringContainsString('<div class="rad-companion-media-file">', $html);
+        $this->assertStringContainsString('handbook.docx', $html);
+        $this->assertStringNotContainsString('rad-companion-media-doc', $html);
+    }
+
+    /** @test */
+    public function storedImageStillRendersImgTag()
+    {
+        $field = CompanionFields::normalizeField('hero', 'media');
+
+        $stored = serialize([
+            'id' => 0,
+            'url' => 'https://example.com/wp-content/uploads/2026/11/hero.jpg',
+            'alt' => 'Hello',
+        ]);
+
+        $html = $this->fieldMarkupWithoutAssets(CompanionFields::renderField($field, $stored));
+
+        $this->assertStringContainsString('data-attachment-type="image"', $html);
+        $this->assertStringContainsString('<img class="rad-companion-media-img"', $html);
+        $this->assertStringNotContainsString('<div class="rad-companion-media-file">', $html);
+    }
+
+    /** @test */
+    public function objectOutputReturnsAttachmentArrayFromWpPrepareAttachmentForJs()
+    {
+        require_once ABSPATH . 'wp-admin/includes/media.php';
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        require_once ABSPATH . 'wp-admin/includes/image.php';
+
+        $attachmentId = self::factory()->attachment->create([
+            'post_mime_type' => 'application/pdf',
+            'post_title' => 'Menu',
+            'guid' => 'https://example.com/wp-content/uploads/menu.pdf',
+        ]);
+
+        $field = CompanionFields::normalizeField('featured_document', [
+            'type' => 'media',
+            'filetypes' => 'documents',
+            'output' => 'object',
+        ]);
+
+        $resolved = CompanionFields::resolveMediaValue($field, serialize([
+            'id' => $attachmentId,
+            'url' => 'https://example.com/wp-content/uploads/menu.pdf',
+            'alt' => '',
+        ]));
+
+        $this->assertIsArray($resolved);
+        $this->assertArrayHasKey('type', $resolved);
+        $this->assertSame('application', $resolved['type']);
+        $this->assertSame('pdf', $resolved['subtype']);
+        $this->assertSame($attachmentId, (int) $resolved['id']);
+    }
+
+    /** @test */
+    public function objectOutputWithMissingAttachmentDegradesToEmptyArray()
+    {
+        $field = CompanionFields::normalizeField('featured_document', [
+            'type' => 'media',
+            'output' => 'object',
+        ]);
+
+        // id 0 short-circuits before wp_prepare_attachment_for_js is called.
+        $this->assertSame('', CompanionFields::resolveMediaValue($field, serialize(['id' => 0, 'url' => '', 'alt' => ''])));
+    }
+
+    /** @test */
+    public function mediaOutputsIncludesObject()
+    {
+        $this->assertContains('object', CompanionFields::MEDIA_OUTPUTS);
+        // The original outputs are still supported unchanged.
+        foreach (['id', 'url', 'alt', 'html', 'array'] as $prior) {
+            $this->assertContains($prior, CompanionFields::MEDIA_OUTPUTS);
+        }
+    }
+
+    /** @test */
+    public function repeaterLayoutDefaultsToTableAndAcceptsStacked()
+    {
+        $subs = ['a' => 'text', 'b' => 'text'];
+
+        $plain = CompanionFields::normalizeField('paper_details', ['type' => 'repeater', 'fields' => $subs]);
+        $this->assertSame('table', $plain['layout'] ?? 'table');
+
+        $stacked = CompanionFields::normalizeField('paper_details', ['type' => 'repeater', 'layout' => 'stacked', 'fields' => $subs]);
+        $this->assertSame('stacked', $stacked['layout']);
+
+        // Unknown values fall back to table so a typo doesn't quietly flip
+        // a horizontal repeater into stacked (or vice-versa).
+        $typo = CompanionFields::normalizeField('paper_details', ['type' => 'repeater', 'layout' => 'vertical', 'fields' => $subs]);
+        $this->assertSame('table', $typo['layout']);
+    }
+
+    /** @test */
+    public function stackedRepeaterDropsTheHeadAndInlineGridStyle()
+    {
+        $field = CompanionFields::normalizeField('paper_details', [
+            'type' => 'repeater',
+            'label' => 'Paper Details',
+            'layout' => 'stacked',
+            'fields' => ['title' => 'text', 'weight' => 'text'],
+        ]);
+
+        $html = CompanionFields::renderField($field, serialize([['title' => 'T1', 'weight' => '100']]));
+
+        // Wrapper carries the stacked modifier so the CSS vertical rules apply.
+        $this->assertStringContainsString('rad-companion-repeater--stacked', $html);
+        // No head element rendered. (Match the actual HTML element, not just the
+        // class name — the class string appears in the inline admin stylesheet
+        // too, which is emitted once per request alongside the first field.)
+        $this->assertStringNotContainsString('<div class="rad-companion-repeater-head"', $html);
+        // The per-row inline style attribute is not emitted either; stacked
+        // layout lets CSS drive the row as a 48px|1fr|64px grid.
+        $this->assertStringNotContainsString('style="grid-template-columns:', $html);
+        // Rows still exist so the JS add/remove/reorder/JSON-sync code path
+        // stays intact (nothing about the DOM shape changes).
+        $this->assertStringContainsString('rad-companion-repeater-row', $html);
+        $this->assertStringContainsString('rad-companion-repeater-remove', $html);
+    }
+
+    /** @test */
+    public function repeaterRowKeysAreUniqueAcrossRepeatersOnThePage()
+    {
+        // Two repeaters with the same sub-field name: their rows used to both
+        // be keyed row-0, giving duplicate wysiwyg editor ids (the second
+        // editor never initialised) and shared radio group names.
+        $field = CompanionFields::normalizeField('cards', [
+            'type' => 'repeater',
+            'fields' => ['title' => 'text'],
+        ]);
+        $value = serialize([['title' => 'A']]);
+
+        preg_match('/name="rad_(row-\d+)\[title\]"/', CompanionFields::renderField($field, $value), $first);
+        preg_match('/name="rad_(row-\d+)\[title\]"/', CompanionFields::renderField($field, $value), $second);
+
+        $this->assertNotEmpty($first);
+        $this->assertNotEmpty($second);
+        $this->assertNotSame($first[1], $second[1]);
+    }
+
+    /** @test */
+    public function tableLayoutRepeaterStillRendersHeadAndGridStyle()
+    {
+        $field = CompanionFields::normalizeField('features', [
+            'type' => 'repeater',
+            'label' => 'Features',
+            'fields' => ['title' => 'text', 'icon' => 'media'],
+        ]);
+
+        $html = CompanionFields::renderField($field, serialize([['title' => 'T1', 'icon' => '']]));
+
+        $this->assertStringContainsString('rad-companion-repeater--table', $html);
+        $this->assertStringContainsString('<div class="rad-companion-repeater-head"', $html);
+        // Table layout lays out a 48px gutter + one minmax() track per sub-field
+        // (equal 1fr here) + a 64px action column — see repeaterColumnSize().
+        $this->assertStringContainsString(
+            'style="grid-template-columns:48px minmax(160px,1fr) minmax(160px,1fr) 64px;',
+            $html
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // needsWysiwyg / needsMedia (drive admin_enqueue_scripts)
+    // ------------------------------------------------------------------
+
+    /** @test */
+    public function needsMediaDetectsFlatMediaField()
+    {
+        $fields = [CompanionFields::normalizeField('hero', 'media')];
+        $this->assertTrue(CompanionFields::needsMedia($fields));
+    }
+
+    /** @test */
+    public function needsMediaIsFalseWhenNoMediaPresent()
+    {
+        $fields = [
+            CompanionFields::normalizeField('title', 'text'),
+            CompanionFields::normalizeField('body', 'textarea'),
+        ];
+        $this->assertFalse(CompanionFields::needsMedia($fields));
+    }
+
+    /** @test */
+    public function needsMediaDescendsIntoRepeaterSubFields()
+    {
+        $fields = [CompanionFields::normalizeField('gallery', [
+            'type' => 'repeater',
+            'fields' => [
+                'caption' => 'text',
+                'image' => 'media',
+            ],
+        ])];
+        $this->assertTrue(CompanionFields::needsMedia($fields));
+    }
+
+    /** @test */
+    public function needsMediaDescendsIntoFlexibleLayoutFields()
+    {
+        $fields = [CompanionFields::normalizeField('content', [
+            'type' => 'flexible',
+            'layouts' => [
+                'hero' => ['fields' => ['background' => 'media']],
+                'cta' => ['fields' => ['button_label' => 'text']],
+            ],
+        ])];
+        $this->assertTrue(CompanionFields::needsMedia($fields));
+    }
+
+    /** @test */
+    public function needsWysiwygStillDetectsOnlyWysiwygs()
+    {
+        $fields = [
+            CompanionFields::normalizeField('hero', 'media'),
+            CompanionFields::normalizeField('body', 'textarea'),
+        ];
+        $this->assertFalse(CompanionFields::needsWysiwyg($fields));
+
+        $fields[] = CompanionFields::normalizeField('rich', 'wysiwyg');
+        $this->assertTrue(CompanionFields::needsWysiwyg($fields));
+    }
+
+    /** @test */
+    public function previewScopesIdsWithoutChangingSubmittedFieldNames()
+    {
+        $fields = [
+            CompanionFields::normalizeField('header_image', 'text'),
+            CompanionFields::normalizeField('main_title', 'text'),
+        ];
+
+        $html = CompanionFields::renderBox(
+            'rad_companion_tpl_flexible',
+            'tpl-flexible.php',
+            $fields,
+            ['header_image' => 'Stored value'],
+            'tpl-flexible',
+            false
+        );
+
+        $this->assertStringContainsString('name="rad_header_image"', $html);
+        $this->assertStringContainsString('id="rad_header_image__tpl-flexible"', $html);
+        $this->assertStringContainsString('value="Stored value"', $html);
+        $this->assertStringNotContainsString('name="rad_header_image__tpl-flexible"', $html);
+        $this->assertStringNotContainsString('name="rad_companion_nonce"', $html);
+    }
+
+    /** @test */
+    public function previewScopesCompositeFieldIdsAsSuffixesForExistingJsSelectors()
+    {
+        $fields = [
+            CompanionFields::normalizeField('features', [
+                'type' => 'repeater',
+                'fields' => ['title' => 'text'],
+            ]),
+            CompanionFields::normalizeField('content', [
+                'type' => 'flexible',
+                'layouts' => [
+                    'hero' => ['fields' => ['heading' => 'text']],
+                ],
+            ]),
+        ];
+
+        $html = CompanionFields::renderBox(
+            'rad_companion_tpl_flexible',
+            'tpl-flexible.php',
+            $fields,
+            [],
+            'tpl-flexible',
+            false
+        );
+
+        $this->assertStringContainsString('id="rad-companion-repeater-features__tpl-flexible"', $html);
+        $this->assertStringContainsString('id="rad-companion-row-template-features__tpl-flexible"', $html);
+        $this->assertStringContainsString('id="rad-flexible-content__tpl-flexible"', $html);
+        $this->assertStringContainsString('id="rad-flexible-template-content__tpl-flexible-hero"', $html);
+        // With no stored rows/blocks the only sub-field inputs are the blank
+        // templates (token `blank` / `blank-<layout>`); the JS rekeys those to
+        // `row-N` / `block-N` when one is added client-side. Names stay
+        // un-namespaced (`rad_blank[...]`, not `rad_blank__tpl-...[...]`).
+        $this->assertMatchesRegularExpression('/name="rad_blank\[title\]"/', $html);
+        $this->assertMatchesRegularExpression('/name="rad_blank-hero\[heading\]"/', $html);
+    }
+
+    /** @test */
+    public function previewContainerUsesOneSharedNonceForTheSelectedTemplate()
+    {
+        $postId = $this->factory()->post->create([
+            'post_type' => 'page',
+            'post_title' => 'Preview',
+        ]);
+        update_post_meta($postId, '_wp_page_template', 'tpl-flexible.php');
+
+        $groups = [
+            'tpl-flexible.php' => [
+                'title' => 'Flexible',
+                'template' => 'tpl-flexible.php',
+                'post_type' => null,
+                'fields' => [CompanionFields::normalizeField('header_image', 'text')],
+                'sidebar_fields' => [],
+                'hidden' => ['content'],
+            ],
+        ];
+
+        $html = CompanionFields::renderPreviewContainer(get_post($postId), $groups, 'fields');
+
+        $this->assertStringContainsString('data-rad-active="tpl-flexible.php"', $html);
+        $this->assertStringContainsString('name="rad_companion_preview_template" value="tpl-flexible.php"', $html);
+        $this->assertStringContainsString('name="rad_companion_preview_nonce"', $html);
+        $this->assertStringNotContainsString('name="rad_companion_nonce"', $html);
+        $this->assertStringContainsString('window.radCompanionPreview', $html);
+        $this->assertStringContainsString('body[data-rad-active-template="tpl-flexible.php"] #postdivrich{display:none', $html);
     }
 }

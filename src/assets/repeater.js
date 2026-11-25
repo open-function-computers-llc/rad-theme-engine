@@ -23,10 +23,12 @@
     function readRow($row) {
         flushWysiwyg();
         var o = {};
-        $row.find('input[type=hidden],input[type=text],input[type=email],input[type=number],input[type=url],input[type=password],input[type=date],input[type=datetime-local],input[type=time],input[type=week],input[type=month],input[type=checkbox],textarea,select').each(function () {
+        $row.find('input[type=hidden],input[type=text],input[type=email],input[type=tel],input[type=number],input[type=url],input[type=password],input[type=date],input[type=datetime-local],input[type=time],input[type=week],input[type=month],input[type=checkbox],input[type=radio],textarea,select').each(function () {
             // Input names render as rad_<rowKey>[<sub>], e.g. rad_row-0[title]
             var m = this.name.match(/^rad_(?:blank|row-\d+)\[([\w\-]+)\]$/);
             if (!m) return;
+            // Only the selected radio in a group carries the value.
+            if (this.type === 'radio' && !this.checked) return;
             // Checkboxes report their state via `.checked`, not `.value`.
             o[m[1]] = (this.type === 'checkbox') ? (this.checked ? this.value : '') : this.value;
         });
@@ -52,18 +54,25 @@
         setTimeout(function () { sync($repeater); }, 0);
     }
 
-    function hydrate($repeater) {
-        // Re-run the media preview hydration for any media sub-fields in rows.
-        $repeater.find('.rad-companion-media').each(function () {
+function hydrate($scope) {
+        // Re-draw media previews in freshly cloned rows/blocks from their hidden
+        // JSON. Uses the shared, type-aware renderer from media.js so a PDF or
+        // other document keeps its filename tile instead of becoming a broken
+        // (blank) <img>. Only previews out of step with their input are
+        // touched, so existing rows keep their server-rendered previews.
+        $scope.find('.rad-companion-media').each(function () {
             var el = $(this);
-            var input = el.find('input[type=hidden]');
+            var input = el.children('input[type=hidden]');
             var cur = {};
             try { cur = JSON.parse(input.val() || '{}'); } catch (e) { cur = {}; }
-            var preview = el.find('.rad-companion-media-preview');
-            preview.removeAttr('data-id').attr('data-id', cur.id || '');
-            preview.html(cur.url
-                ? '<img class="rad-companion-media-img" src="' + cur.url + '" alt="' + (cur.alt || '') + '" />'
-                : '<p class="description">No media selected.</p>');
+            var preview = el.children('.rad-companion-media-preview');
+            if (String(preview.attr('data-id') || '') === String(cur.id || '') && preview.children().length) return;
+            if (window.radRenderMedia) {
+                window.radRenderMedia(el, cur.id || '', cur.url || '', cur.alt || '', el.attr('data-attachment-type') || 'unknown');
+                return;
+            }
+            preview.attr('data-id', cur.id || '');
+            if (!cur.url) preview.html('<p class="description">No media selected.</p>');
         });
     }
 
@@ -76,6 +85,23 @@
         });
     }
 
+    function refresh(scope) {
+        var $scope = scope ? $(scope) : $(document);
+        $scope.find('.rad-companion-repeater').each(function () {
+            renumberRows($(this));
+        });
+
+        if (window.radRefreshMedia) {
+            window.radRefreshMedia($scope);
+        } else {
+            hydrate($scope);
+        }
+    }
+
+    window.radRefreshRepeater = refresh;
+
+    var rowSeq = 0;
+
     $(document).on('click', 'a.rad-companion-repeater-add', function (e) {
         e.preventDefault();
         var $repeater = $(this).closest('.rad-companion-repeater');
@@ -87,11 +113,14 @@
         // key) to a unique `row-N` so input names stay unique and any nested
         // wysiwyg editor gets re-targeted + initialised.
         var $newRow = $rows.children().last();
-        var newKey = 'row-' + $rows.children().length;
+        // Must be unique for the life of the page: a count-based key repeats
+        // after a row is removed, which made two rows share radio groups and
+        // TinyMCE editor ids (the second editor then failed to initialise).
+        var newKey = 'row-' + Date.now() + (++rowSeq);
         if (window.radRekeyRow) {
             window.radRekeyRow($newRow, 'blank', newKey);
         }
-        hydrate($repeater);
+        hydrate($newRow);
         sync($repeater);
         renumberRows($repeater);
     });
@@ -110,10 +139,7 @@
 
     // Hydrate all repeaters on page load so media previews show correctly.
     $(document).ready(function () {
-        $('.rad-companion-repeater').each(function () {
-            hydrate($(this));
-            renumberRows($(this));
-        });
+        refresh(document);
     });
 
     // Keep the hidden JSON in sync with edits to any sub-field.

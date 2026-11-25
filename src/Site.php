@@ -393,9 +393,9 @@ class Site
             }
 
             if (isset($cpt["taxonomies"])) {
-                foreach ($cpt["taxonomies"] as $customTaxonomy) {
-                    $cptTaxonomies[] = $customTaxonomy;
-                    $newCpt->taxonomy($customTaxonomy);
+                foreach ($this->normalizeCptTaxonomies($cpt["taxonomies"]) as $name => $taxOptions) {
+                    $cptTaxonomies[$name] = $taxOptions;
+                    $newCpt->taxonomy($name);
                 }
             }
             $newCpt->register();
@@ -447,14 +447,76 @@ class Site
         }
 
         if (count($cptTaxonomies)) {
-            foreach ($cptTaxonomies as $customTaxonomy) {
-                $tax = new Taxonomy($customTaxonomy);
-                $tax->options([
-                    'hierarchical' => false,
-                ]);
+            foreach ($cptTaxonomies as $name => $taxOptions) {
+                $tax = new Taxonomy($name);
+                $tax->options($taxOptions);
                 $tax->register();
             }
         }
+    }
+
+    /**
+     * Normalise the `taxonomies:` value on a CPT entry into a
+     * name => options map (options default to `hierarchical => false` so the
+     * long-standing behaviour is preserved when nothing extra is supplied).
+     *
+     * Accepted shapes:
+     *   "taxonomies" => "type"                                    // single string
+     *   "taxonomies" => ["type", "brand"]                        // list of names
+     *   "taxonomies" => ["type" => ["hierarchical" => true]]     // map with options
+     *   "taxonomies" => [                                        // mixed
+     *       "brand",
+     *       "type" => ["hierarchical" => true, "show_in_rest" => true],
+     *   ]
+     *
+     * The options array is forwarded verbatim to `register_taxonomy`'s $args,
+     * so anything WP accepts there (`hierarchical`, `show_in_rest`,
+     * `show_admin_column`, `rewrite`, …) is honoured.
+     *
+     * @param  string|array $taxonomies
+     * @return array<string, array>
+     */
+    private function normalizeCptTaxonomies($taxonomies): array
+    {
+        if (is_string($taxonomies)) {
+            $taxonomies = [$taxonomies];
+        }
+
+        if (!is_array($taxonomies)) {
+            return [];
+        }
+
+        $normalized = [];
+        foreach ($taxonomies as $key => $value) {
+            if (is_string($key) && is_array($value)) {
+                // Map form: name => options.
+                $normalized[$key] = array_merge(['hierarchical' => false], $value);
+                continue;
+            }
+
+            if (is_string($key) && is_string($value)) {
+                // Map form with a scalar value — treat the key as the name and
+                // ignore the (meaningless) scalar value.
+                $normalized[$key] = ['hierarchical' => false];
+                continue;
+            }
+
+            if (is_int($key) && is_string($value)) {
+                // List form: just a name.
+                $normalized[$value] = ['hierarchical' => false];
+                continue;
+            }
+
+            if (is_int($key) && is_array($value) && isset($value['slug'])) {
+                // Extended list form: [{ slug: "type", hierarchical: true }, ...].
+                $name = (string) $value['slug'];
+                unset($value['slug']);
+                $normalized[$name] = array_merge(['hierarchical' => false], $value);
+                continue;
+            }
+        }
+
+        return $normalized;
     }
 
     private function disable(array $keys)
@@ -484,6 +546,48 @@ class Site
                     remove_submenu_page('themes.php', 'edit.php?post_type=wp_block');
                     remove_submenu_page('themes.php', 'site-editor.php?p=/pattern');
                     remove_submenu_page('themes.php', 'site-editor.php?p=/patterns');
+                });
+                continue;
+            }
+            if ($key === "fonts") {
+                add_action('admin_init', function () {
+                    remove_submenu_page('themes.php', 'font-library.php');
+                });
+                continue;
+            }
+            if ($key === "comments") {
+                // Kill the Comments entry in the left-hand admin menu.
+                add_action('admin_menu', function () {
+                    remove_menu_page('edit-comments.php');
+                });
+
+                // Kill the comment bubble on the front-end admin bar.
+                add_action('admin_bar_menu', function ($bar) {
+                    $bar->remove_node('comments');
+                }, 999);
+
+                // Strip comment/ping support off every post type registered
+                // by WP core or by us. Priority 20 is intentional: core and
+                // PostTypes register on `init` at 10, so we need to run after
+                // both to see the full post-type list.
+                add_action('init', function () {
+                    foreach (get_post_types() as $type) {
+                        remove_post_type_support($type, 'comments');
+                        remove_post_type_support($type, 'trackbacks');
+                    }
+                }, 20);
+
+                // Belt-and-braces: even if a plugin re-adds comment support
+                // (or a post was authored before this was disabled), no
+                // comments or pings should ever be open.
+                add_filter('comments_open', '__return_false', 100);
+                add_filter('pings_open', '__return_false', 100);
+
+                // Anyone with a bookmark to the deleted Comments screen lands
+                // on the dashboard instead of an empty-comments list.
+                add_action('load-edit-comments.php', function () {
+                    wp_safe_redirect(admin_url());
+                    exit;
                 });
                 continue;
             }
@@ -878,9 +982,44 @@ class Site
      */
     public function getOption(string $page, ?string $field = null)
     {
-        return $field === null
-            ? OptionPages::resolveAll($page)
-            : OptionPages::resolveField($page, $field);
+        if ($field === null) {
+            return OptionPages::resolveAll($page);
+        }
+
+        // Support dotted sub-paths on the field name so templates can pluck
+        // a value out of a structured field's resolved shape — most commonly
+        // `product_guide.url` on a `type: media, output: object` field.
+        $parts = explode('.', $field);
+        $value = OptionPages::resolveField($page, $parts[0]);
+        if (count($parts) > 1) {
+            $value = $this->descendOptionValue($value, array_slice($parts, 1));
+        }
+        return $value;
+    }
+
+    /**
+     * Walk a resolved option value by a list of array/object keys. Any step
+     * that misses returns the empty string so a bad path in a template just
+     * renders nothing rather than blowing up.
+     *
+     * @param mixed $value
+     * @param string[] $path
+     * @return mixed
+     */
+    private function descendOptionValue($value, array $path)
+    {
+        foreach ($path as $key) {
+            if (is_array($value) && array_key_exists($key, $value)) {
+                $value = $value[$key];
+                continue;
+            }
+            if (is_object($value) && isset($value->$key)) {
+                $value = $value->$key;
+                continue;
+            }
+            return '';
+        }
+        return $value;
     }
 
     /**
@@ -889,20 +1028,43 @@ class Site
      * whole page as a name=>value map; otherwise searches every configured page
      * for a field with that name and returns the resolved value.
      *
+     * Dotted paths are supported on top of the above:
+     *   "site-settings"                          -> whole page map
+     *   "site-settings.facebook_url"             -> field value on that page
+     *   "papers_cpt_product_guide"               -> searched across pages
+     *   "papers_cpt_product_guide.url"           -> same, then descends into
+     *                                               the resolved value
+     *
      * @return mixed
      */
     public function resolveRadOptionToken(string $token)
     {
-        // First, is it a whole page?
         $groups = OptionPages::discover(OptionPages::names());
-        $slug = OptionPages::slugFor($token);
-        if (isset($groups[$slug])) {
-            return OptionPages::resolveAll($slug);
+        $segments = explode('.', $token);
+        $first = $segments[0];
+
+        // Is the first segment a page slug?
+        $pageSlug = OptionPages::slugFor($first);
+        if (isset($groups[$pageSlug])) {
+            if (count($segments) === 1) {
+                return OptionPages::resolveAll($pageSlug);
+            }
+            $value = OptionPages::resolveField($pageSlug, $segments[1]);
+            return $this->descendOptionValue($value, array_slice($segments, 2));
         }
 
-        // Otherwise, search every page for a field with this name.
-        foreach (array_keys($groups) as $pageSlug) {
-            $all = OptionPages::resolveAll($pageSlug);
+        // Otherwise treat the first segment as a field name and search pages.
+        foreach (array_keys($groups) as $candidatePage) {
+            $all = OptionPages::resolveAll($candidatePage);
+            if (array_key_exists($first, $all)) {
+                return $this->descendOptionValue($all[$first], array_slice($segments, 1));
+            }
+        }
+
+        // Last resort: the raw token might literally be a field name with a
+        // dot in it (rare, but pre-dot-splitting behaviour allowed it).
+        foreach (array_keys($groups) as $candidatePage) {
+            $all = OptionPages::resolveAll($candidatePage);
             if (array_key_exists($token, $all)) {
                 return $all[$token];
             }
@@ -1286,6 +1448,35 @@ class Site
                 $output["children"] = site()->getTermChildren($term, $fields);
                 continue;
             }
+
+            // `posts.<field1>,<field2>,...` — every post attached to this term,
+            // shaped the same way getPost would shape it. Mirrors the
+            // `children.<...>` syntax on the term side. post_type defaults to
+            // the taxonomy's own object types so you don't have to say it.
+            if (str_starts_with($key, "posts.")) {
+                $subFields = explode(",", substr($key, strlen("posts.")));
+                $taxObj = get_taxonomy($term->taxonomy);
+                $postTypes = $taxObj ? $taxObj->object_type : ['post'];
+                $posts = get_posts([
+                    'post_type' => $postTypes,
+                    'numberposts' => -1,
+                    'orderby' => 'title',
+                    'order' => 'ASC',
+                    'suppress_filters' => true,
+                    'tax_query' => [
+                        [
+                            'taxonomy' => $term->taxonomy,
+                            'field' => 'term_id',
+                            'terms' => $term->term_id,
+                        ],
+                    ],
+                ]);
+                $output["posts"] = [];
+                foreach ($posts as $post) {
+                    $output["posts"][] = $this->getPost($post, $subFields);
+                }
+                continue;
+            }
             if ($key === "id" || $key === "ID" || $key === "term_id") {
                 $output[$key] = $term->term_id;
                 continue;
@@ -1314,6 +1505,23 @@ class Site
             if (substr($key, 0, 4) === "acf.") {
                 $key = str_replace("acf.", "", $key);
                 $output[$key] = get_field($key, $term->taxonomy . "_" . $term->term_id);
+                continue;
+            }
+
+            // handle companion-yml taxonomy fields declared in
+            // taxonomy-<slug>.yml or taxonomies/<slug>.yml. Same `rad.<name>`
+            // prefix as post fields (getFieldsForPost); output key strips the
+            // prefix and media/repeater/flexible resolve to their yml output.
+            if (substr($key, 0, 4) === "rad.") {
+                $name = str_replace("rad.", "", $key);
+
+                if (substr($name, -5) === "-JSON") {
+                    $name = substr($name, 0, strlen($name) - 5);
+                    $output[$name] = TaxonomyFields::resolveField($term->taxonomy, $name, $term->term_id);
+                    continue;
+                }
+
+                $output[$name] = TaxonomyFields::resolveField($term->taxonomy, $name, $term->term_id);
                 continue;
             }
 
@@ -1464,7 +1672,7 @@ class Site
         foreach (wp_get_nav_menu_items($locations[$menuLocation]) as $menuItem) {
             if ($menuItem->menu_item_parent === "0") {
                 $output[$menuItem->ID] = [
-                    "id" => $menuItem->ID,
+                    "id" => $menuItem->object_id,
                     "title" => $menuItem->title,
                     "url" => $menuItem->url,
                     "hasChildren" => false,
@@ -1605,6 +1813,10 @@ class Site
         // .yml file (e.g. tpl-flexible.php -> tpl-flexible.yml) whose `fields:`
         // block drives an admin meta box. See CompanionFields.
         CompanionFields::boot();
+
+        // Taxonomy term fields from taxonomy-<slug>.php companion ymls and
+        // taxonomies/<slug>.yml. See TaxonomyFields.
+        TaxonomyFields::boot();
 
         // some default admin ajax hooks for field processing
         $existingCPTSlugs = $this->cptSlugs;

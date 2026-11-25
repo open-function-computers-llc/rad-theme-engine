@@ -24,13 +24,90 @@ class CompanionFields
     public const SUPPORTED = [
         'text', 'email', 'number', 'tel', 'url', 'password',
         'date', 'datetime-local', 'time', 'week', 'month',
-        'textarea', 'checkbox', 'select', 'media', 'repeater', 'flexible', 'wysiwyg',
+        'textarea', 'checkbox', 'select', 'radio', 'media', 'repeater', 'flexible', 'wysiwyg',
+        'message',
     ];
 
     /**
-     * Media output types a `media` field can be resolved to on the frontend.
+     * Field types that render no form control, so they hold nothing to save
+     * (see save()) and nothing to resolve on the frontend.
      */
-    public const MEDIA_OUTPUTS = ['id', 'url', 'alt', 'html', 'array'];
+    public const NON_INPUT_TYPES = ['message'];
+
+    /**
+     * Media output types a `media` field can be resolved to on the frontend.
+     * - id/url/alt/html/array keep the historical shapes.
+     * - `object` returns the full attachment as a `wp_prepare_attachment_for_js`
+     *   style array (url, link, alt, title, mime, type, width/height, sizes...).
+     */
+    public const MEDIA_OUTPUTS = ['id', 'url', 'alt', 'html', 'array', 'object'];
+
+    /**
+     * Named file-type filters a `media` field's `filetypes:` key can select.
+     * The value decides what shows up in the wp.media picker:
+     *   image     -> library.type = 'image'        (default)
+     *   videos    -> library.type = 'video'
+     *   documents -> library.type = 'application'  (PDFs, Office, text, zip…)
+     *   all       -> no type filter (everything the user can upload)
+     * Unknown values fall back to `image` so a typo never accidentally opens
+     * the picker to the entire library.
+     */
+    public const MEDIA_FILETYPES = ['image', 'videos', 'documents', 'all'];
+
+    /**
+     * Admin arrangements a `repeater` field's `layout:` key can select.
+     * - table   (default) — grid of columns (one per sub-field) with a head row.
+     * - stacked — each row shows its sub-fields full-width and labelled, one
+     *             per line. Better when a row has many sub-fields or wide
+     *             inputs (media, wysiwyg, …).
+     * Unknown values fall back to `table`.
+     */
+    public const REPEATER_LAYOUTS = ['table', 'stacked'];
+
+    /**
+     * Page-wide counter for server-rendered repeater row keys (rad_row-<n>).
+     * Keys must be unique across every repeater on the screen, not just within
+     * one: wysiwyg editor ids and radio group names derive from them, and two
+     * repeaters both using row-0 left the second editor uninitialised (no
+     * toolbar, white text) and linked their radio groups. Digits only, to
+     * match the row-\d+ name pattern in repeater.js.
+     */
+    private static int $rowSeq = 0;
+
+    /**
+     * Page-wide counter for server-rendered flexible block keys (rad_block-<n>),
+     * with the same uniqueness rules as $rowSeq.
+     */
+    private static int $blockSeq = 0;
+
+    /**
+     * wp_editor instance ids created this request, in render order. The template
+     * preview AJAX response uses this to ship just those editors' TinyMCE /
+     * Quicktags init settings (see ajaxTemplateGroup()).
+     *
+     * @var string[]
+     */
+    private static array $renderedEditors = [];
+
+    /**
+     * Whether the template-preview screen config has been emitted this request.
+     * Both preview columns print the loader script; only the first prints the
+     * shared window.radCompanionPreview config.
+     */
+    private static bool $previewConfigPrinted = false;
+
+    /**
+     * Companion groups whose row / block counters have been seeded this request
+     * (see seedGroupCounters()).
+     *
+     * @var array<string, bool>
+     */
+    private static array $seededGroups = [];
+
+    /**
+     * Whether the preview container's `hidden:` stylesheet has been emitted.
+     */
+    private static bool $previewStylesPrinted = false;
 
     /**
      * Field types recognised by the format but not yet rendered.
@@ -82,33 +159,43 @@ class CompanionFields
 
                 $boxId = 'rad_companion_' . self::slug($template);
 
-                $values = [];
-                foreach ($meta['fields'] as $field) {
-                    $raw = get_post_meta($post->ID, 'rad_' . $field['name'], true);
-                    // Media and repeater fields are stored serialized; convert to
-                    // JSON for the admin inputs (which expect JSON strings).
-                    if ($field['type'] === 'media' || $field['type'] === 'repeater') {
-                        $decoded = self::unserializeValue($raw);
-                        $values[$field['name']] = is_array($decoded) ? json_encode($decoded) : '';
-                    } else {
-                        $values[$field['name']] = $raw;
-                    }
+                if (!empty($meta['fields'])) {
+                    $values = self::valuesForFields($meta['fields'], $post->ID);
+
+                    // Render into the main editor area (a "post box"), not the
+                    // sidebar. Use the current post type (page, post, or the CPT)
+                    // so WordPress registers the box under the exact screen that
+                    // do_meta_boxes() reads for this edit screen.
+                    add_meta_box(
+                        $boxId,
+                        'Custom Fields',
+                        function () use ($boxId, $template, $meta, $values) {
+                            echo self::renderBox($boxId, $template, $meta['fields'], $values);
+                        },
+                        $screen->post_type,
+                        'normal',
+                        'default'
+                    );
                 }
 
-                // Render into the main editor area (a "post box"), not the
-                // sidebar. Use the current post type (page, post, or the CPT)
-                // so WordPress registers the box under the exact screen that
-                // do_meta_boxes() reads for this edit screen.
-                add_meta_box(
-                    $boxId,
-                    'Custom Fields',
-                    function () use ($boxId, $template, $meta, $values) {
-                        echo self::renderBox($boxId, $template, $meta['fields'], $values);
-                    },
-                    $screen->post_type,
-                    'normal',
-                    'default'
-                );
+                // `sidebar_fields:` mirrors `fields:` into a second box in the
+                // admin sidebar (right column). Same renderer, same storage —
+                // only the WP context changes ("side" instead of "normal").
+                if (!empty($meta['sidebar_fields'])) {
+                    $sidebarBoxId = $boxId . '_sidebar';
+                    $sidebarValues = self::valuesForFields($meta['sidebar_fields'], $post->ID);
+
+                    add_meta_box(
+                        $sidebarBoxId,
+                        'Sidebar Fields',
+                        function () use ($sidebarBoxId, $template, $meta, $sidebarValues) {
+                            echo self::renderBox($sidebarBoxId, $template, $meta['sidebar_fields'], $sidebarValues);
+                        },
+                        $screen->post_type,
+                        'side',
+                        'default'
+                    );
+                }
 
                 if (!empty($meta['hidden'])) {
                     self::registerHiddenEditors($meta['hidden']);
@@ -116,25 +203,46 @@ class CompanionFields
             }
         });
 
-        // Enqueue the TinyMCE editor assets only when a visible field set uses a
-        // wysiwyg sub-field, and only on the post edit screen where editors live.
+        // Enqueue TinyMCE assets (only when a visible field set uses a wysiwyg
+        // sub-field) and the media manager (whenever a media field is present).
+        // WP only auto-loads these on post-edit screens with a content editor
+        // — for CPTs that disable the editor (and for taxonomy / options
+        // screens elsewhere) we have to pull them in explicitly.
         add_action('admin_enqueue_scripts', function () use ($groups) {
             $screen = function_exists('get_current_screen') ? get_current_screen() : null;
             if (!$screen || $screen->post_type === 'revision') {
                 return;
             }
 
+            $wysiwyg = false;
+            $media = false;
             foreach ($groups as $meta) {
-                if (self::needsWysiwyg($meta['fields'])) {
-                    wp_enqueue_editor();
+                $all = array_merge($meta['fields'], $meta['sidebar_fields'] ?? []);
+                if (!$wysiwyg && self::needsWysiwyg($all)) {
+                    $wysiwyg = true;
+                }
+                if (!$media && self::needsMedia($all)) {
+                    $media = true;
+                }
+                if ($wysiwyg && $media) {
                     break;
                 }
+            }
+            if ($wysiwyg) {
+                wp_enqueue_editor();
+            }
+            if ($media) {
+                wp_enqueue_media();
             }
         });
 
         add_action('save_post', function ($post_id, $post) use ($groups) {
             self::save($post_id, $post, $groups);
         }, 10, 2);
+
+        // Page screens swap companion groups live when the editor changes the
+        // "Template" dropdown, instead of waiting for a save.
+        self::bootTemplatePreview($groups);
 
         // Resolve `rad.<media>-JSON` placeholders in post content into the
         // output type requested in the companion yml (url / id / alt / ...).
@@ -181,6 +289,479 @@ class CompanionFields
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Live template preview
+    //
+    // WordPress stores the page template in `_wp_page_template`, so the engine
+    // can only know which companion group applies once the page has been saved.
+    // On the page edit screen we instead render a single container box that
+    // holds whichever group matches today, and template-preview.js swaps in the
+    // group for a newly selected template the moment the editor picks it from
+    // the "Template" dropdown — same shape as ACF's acf.screen model (watch
+    // #page_template, fetch the groups that now apply, showEnable on the
+    // matching postbox and hideDisable on the rest).
+    // ---------------------------------------------------------------------
+
+    /**
+     * Wire the page-screen container box and its AJAX renderer onto admin.
+     *
+     * @param array $groups discovered companion groups (see discover())
+     */
+    private static function bootTemplatePreview(array $groups): void
+    {
+        // Priority 20: after the add_meta_boxes closure in boot(), so the
+        // per-template boxes it registered can be replaced by the container.
+        add_action('add_meta_boxes', function () use ($groups) {
+            self::registerTemplatePreviewBoxes($groups);
+        }, 20);
+
+        add_action('wp_ajax_rad_companion_template_group', [self::class, 'ajaxTemplateGroup']);
+    }
+
+    /**
+     * Replace the per-template companion boxes on a page (or any post type that
+     * has page templates) with one container per admin column.
+     *
+     * @param array $groups discovered companion groups (see discover())
+     */
+    public static function registerTemplatePreviewBoxes(array $groups): void
+    {
+        if (!function_exists('get_current_screen')) {
+            return;
+        }
+
+        $screen = get_current_screen();
+        if (!$screen || $screen->base !== 'post' || empty($screen->post_type)) {
+            return;
+        }
+
+        $templates = wp_get_theme()->get_page_templates(null, $screen->post_type);
+        if (empty($templates)) {
+            return;
+        }
+
+        $pageGroups = [];
+        foreach ($groups as $filename => $meta) {
+            // CPT-bound groups have no template dropdown to swap on.
+            if (($meta['post_type'] ?? null) !== null) {
+                continue;
+            }
+            if (!isset($templates[$filename])) {
+                continue;
+            }
+            // The theme's "Template Name:" header — used in the confirm dialog when
+            // the editor swaps away from a template they have typed into.
+            $meta['label'] = (string) $templates[$filename];
+            $pageGroups[$filename] = $meta;
+        }
+
+        if (empty($pageGroups) || !apply_filters('rad_companion_template_preview', true, $screen->post_type)) {
+            return;
+        }
+
+        // The container holds the group for whichever template is selected, so
+        // the boxes boot() registered for the saved template would only render
+        // the same fields twice (and the duplicate input names would fight on
+        // submit).
+        foreach ($pageGroups as $filename => $meta) {
+            $slug = self::slug($filename);
+            remove_meta_box('rad_companion_' . $slug, $screen->post_type, 'normal');
+            remove_meta_box('rad_companion_' . $slug . '_sidebar', $screen->post_type, 'side');
+        }
+
+        if (self::previewHasSet($pageGroups, 'fields')) {
+            add_meta_box(
+                'rad_companion_template_preview',
+                'Custom Fields',
+                function ($post) use ($pageGroups) {
+                    echo self::renderPreviewContainer($post, $pageGroups, 'fields');
+                },
+                $screen->post_type,
+                'normal',
+                'default'
+            );
+        }
+
+        if (self::previewHasSet($pageGroups, 'sidebar_fields')) {
+            add_meta_box(
+                'rad_companion_template_preview_sidebar',
+                'Sidebar Fields',
+                function ($post) use ($pageGroups) {
+                    echo self::renderPreviewContainer($post, $pageGroups, 'sidebar_fields');
+                },
+                $screen->post_type,
+                'side',
+                'default'
+            );
+        }
+    }
+
+    /**
+     * Whether any of these groups renders into the given column.
+     *
+     * @param array  $groups page-template companion groups
+     * @param string $set    'fields' (normal) or 'sidebar_fields' (side)
+     */
+    private static function previewHasSet(array $groups, string $set): bool
+    {
+        foreach ($groups as $meta) {
+            if (!empty($meta[$set])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Render one preview column: the active group (server-side, so the page is
+     * usable before any script runs), plus the shared nonce the save handler
+     * accepts for whichever group ends up selected, plus the loader script.
+     *
+     * @param \WP_Post|int $post
+     * @param array         $groups page-template companion groups
+     * @param string        $set    'fields' (normal) or 'sidebar_fields' (side)
+     */
+    public static function renderPreviewContainer($post, array $groups, string $set = 'fields'): string
+    {
+        $post = get_post($post);
+        $postId = $post ? (int) $post->ID : 0;
+        $active = self::previewActiveTemplate($groups, $postId);
+
+        $html = '<div class="rad-companion-preview" data-rad-set="' . esc_attr($set) . '"'
+            . ' data-rad-active="' . esc_attr($active) . '">';
+
+        if ($active !== '' && !empty($groups[$active][$set])) {
+            $fields = $groups[$active][$set];
+            self::seedGroupCounters($active);
+            $values = self::valuesForFields($fields, $postId);
+
+            $html .= '<div class="rad-companion-group" data-rad-template="' . esc_attr($active) . '">'
+                . self::renderBox(
+                    'rad_companion_' . self::slug($active),
+                    $active,
+                    $fields,
+                    $values,
+                    self::previewScope($active),
+                    false
+                )
+                . '</div>';
+        }
+
+        // One shared nonce for the whole container: the save handler accepts it in
+        // place of the per-template nonce, which cannot work here (the selected
+        // template is not known when the form is written, and a second input of
+        // the same name would silently win over the first).
+        $html .= '<input type="hidden" name="rad_companion_preview_template"'
+            . ' value="' . esc_attr($active) . '" />'
+            . '<input type="hidden" name="rad_companion_preview_nonce"'
+            . ' value="' . esc_attr(wp_create_nonce('rad_companion_preview_' . $postId)) . '" />';
+
+        $html .= self::previewStyles($groups);
+        $html .= self::previewScript($groups, $postId, $active);
+
+        return $html . '</div>';
+    }
+
+    /**
+     * The companion group whose template is saved on this post ('' when the page
+     * still uses the theme default, which has no companion yml by definition).
+     */
+    private static function previewActiveTemplate(array $groups, int $postId): string
+    {
+        if ($postId <= 0) {
+            return '';
+        }
+
+        $current = (string) get_post_meta($postId, '_wp_page_template', true);
+        if ($current === '' || $current === 'default') {
+            return '';
+        }
+
+        return isset($groups[$current]) ? $current : '';
+    }
+
+    /**
+     * Id namespace for a group (see idSuffix()). Two templates that both declare
+     * `header_image` can then coexist in the DOM once the editor has swapped
+     * between them.
+     */
+    private static function previewScope(string $template): string
+    {
+        return preg_replace('/[^a-z0-9_-]/', '', self::slug($template)) ?? '';
+    }
+
+    /**
+     * Row / block key block for one group.
+     *
+     * Repeater rows and flexible blocks are keyed `rad_row-<n>` / `rad_block-<n>`
+     * from a counter that restarts on every request, so a group rendered in an
+     * AJAX request would otherwise reuse the keys of the group rendered with the
+     * page: same input names means one shared radio group and duplicated ids.
+     * Each group gets its own numeric block instead.
+     */
+    private static function groupSeqBase(string $template): int
+    {
+        return $template === '' ? 0 : (abs(crc32($template)) % 1000) * 100000;
+    }
+
+    /**
+     * Start the row / block counters inside the given group's numeric block.
+     */
+    private static function seedGroupCounters(string $template): void
+    {
+        // Once per group per request: the two preview columns render different
+        // sets of the same group, and a reseed would hand both columns the same
+        // row / block keys.
+        if (isset(self::$seededGroups[$template])) {
+            return;
+        }
+        self::$seededGroups[$template] = true;
+
+        $base = self::groupSeqBase($template);
+        self::$rowSeq = $base;
+        self::$blockSeq = $base;
+    }
+
+    /**
+     * CSS that follows the selected template for the yml `hidden:` areas.
+     *
+     * The engine's own registerHiddenEditors() prints `#postdivrich{display:none
+     * !important}` for the *saved* template only. Scoping our rules to
+     * body[data-rad-active-template] (set by template-preview.js) both adds the
+     * not-yet-saved templates and lets a switch back to a template that hides
+     * nothing bring the editor back: the base rule and the per-template rules
+     * share a specificity, and the per-template ones are emitted after it.
+     *
+     * @param array $groups page-template companion groups
+     */
+    private static function previewStyles(array $groups): string
+    {
+        if (self::$previewStylesPrinted) {
+            return '';
+        }
+
+        $map = [
+            'content' => '#postdivrich',
+            'excerpt' => '#postexcerpt',
+            'title' => '#titlediv',
+        ];
+
+        $all = [];
+        foreach ($groups as $meta) {
+            foreach ($meta['hidden'] ?? [] as $area) {
+                if (isset($map[$area])) {
+                    $all[] = $map[$area];
+                }
+            }
+        }
+
+        if (empty($all)) {
+            return '';
+        }
+
+        self::$previewStylesPrinted = true;
+
+        $base = 'body[data-rad-active-template] ' . implode(', body[data-rad-active-template] ', array_unique($all));
+        $css = $base . '{display:block !important;}';
+
+        foreach ($groups as $filename => $meta) {
+            $selectors = [];
+            foreach ($meta['hidden'] ?? [] as $area) {
+                if (isset($map[$area])) {
+                    $selectors[] = 'body[data-rad-active-template="' . $filename . '"] ' . $map[$area];
+                }
+            }
+            if ($selectors) {
+                $css .= implode(', ', $selectors) . '{display:none !important;}';
+            }
+        }
+
+        // The title box also owns the slug box; keep them in step (same as
+        // registerHiddenEditors()).
+        foreach ($groups as $filename => $meta) {
+            if (in_array('title', $meta['hidden'] ?? [], true)) {
+                $css .= 'body[data-rad-active-template="' . $filename . '"] #edit-slug-box{display:none !important;}';
+            }
+        }
+
+        return '<style>' . $css . '</style>';
+    }
+
+    /**
+     * Screen config + the loader script. The config is emitted once per screen
+     * (both columns share it); the script is self-guarding so a second copy is
+     * inert.
+     *
+     * @param array  $groups page-template companion groups
+     * @param int    $postId post (or auto-draft) being edited
+     * @param string $active template filename saved on the post ('' for default)
+     */
+    private static function previewScript(array $groups, int $postId, string $active): string
+    {
+        $script = '';
+
+        if (!self::$previewConfigPrinted) {
+            self::$previewConfigPrinted = true;
+
+            $templates = [];
+            foreach ($groups as $filename => $meta) {
+                $templates[$filename] = [
+                    'scope' => self::previewScope($filename),
+                    'label' => isset($meta['label']) ? (string) $meta['label'] : $filename,
+                    'hidden' => $meta['hidden'] ?? [],
+                    'sets' => [
+                        'fields' => !empty($meta['fields']),
+                        'sidebar_fields' => !empty($meta['sidebar_fields']),
+                    ],
+                ];
+            }
+
+            $script = '<script>window.radCompanionPreview = '
+                . wp_json_encode([
+                    'ajaxUrl' => admin_url('admin-ajax.php'),
+                    'nonce' => wp_create_nonce('rad_companion_preview_' . $postId),
+                    'postId' => $postId,
+                    'active' => $active,
+                    'templates' => (object) $templates,
+                ])
+                . ';</script>';
+        }
+
+        return $script . CompanionAssets::script('template-preview.js');
+    }
+
+    /**
+     * AJAX: render one companion group (both columns) for the template the editor
+     * just selected, and return the TinyMCE / Quicktags settings of the wp_editor
+     * instances it contains.
+     *
+     * Those settings are normally printed by WordPress at
+     * admin_print_footer_scripts, which never fires during admin-ajax, so the
+     * browser is handed the init objects instead and boots the editors itself
+     * (see template-preview.js).
+     */
+    public static function ajaxTemplateGroup(): void
+    {
+        $postId = isset($_POST['post_id']) ? (int) $_POST['post_id'] : 0;
+        $template = isset($_POST['template']) ? (string) wp_unslash($_POST['template']) : '';
+        $nonce = isset($_POST['nonce']) ? sanitize_text_field(wp_unslash($_POST['nonce'])) : '';
+
+        if ($postId <= 0 || $template === '' || !wp_verify_nonce($nonce, 'rad_companion_preview_' . $postId)) {
+            wp_send_json_error(['message' => 'This preview request is no longer valid. Reload the page and try again.']);
+        }
+
+        $post = get_post($postId);
+        if (!$post || !current_user_can('edit_post', $postId)) {
+            wp_send_json_error(['message' => 'Sorry, you are not allowed to edit this page.']);
+        }
+
+        $groups = self::discover();
+        if (!isset($groups[$template]) || ($groups[$template]['post_type'] ?? null) !== null) {
+            wp_send_json_error(['message' => 'Unknown page template.']);
+        }
+
+        $meta = $groups[$template];
+        $scope = self::previewScope($template);
+        self::seedGroupCounters($template);
+        self::$renderedEditors = [];
+
+        $html = [];
+        foreach (['fields', 'sidebar_fields'] as $set) {
+            $fields = $meta[$set] ?? [];
+            if (empty($fields)) {
+                $html[$set] = '';
+                continue;
+            }
+            $values = self::valuesForFields($fields, $postId);
+            $html[$set] = self::renderBox(
+                'rad_companion_' . self::slug($template),
+                $template,
+                $fields,
+                $values,
+                $scope,
+                false
+            );
+        }
+
+        wp_send_json_success([
+            'html' => $html,
+            'editors' => self::editorInitSettings(),
+            'hidden' => $meta['hidden'] ?? [],
+        ]);
+    }
+
+    /**
+     * TinyMCE / Quicktags init objects for the wp_editor instances rendered this
+     * request. WordPress keeps them in private statics on _WP_Editors and prints
+     * them only from its footer hooks.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    private static function editorInitSettings(): array
+    {
+        if (empty(self::$renderedEditors) || !class_exists('_WP_Editors')) {
+            return [];
+        }
+
+        $props = (new \ReflectionClass('_WP_Editors'))->getStaticProperties();
+        $mce = isset($props['mce_settings']) && is_array($props['mce_settings']) ? $props['mce_settings'] : [];
+        $qt = isset($props['qt_settings']) && is_array($props['qt_settings']) ? $props['qt_settings'] : [];
+
+        $out = [];
+        foreach (array_unique(self::$renderedEditors) as $editorId) {
+            $entry = [];
+            if (isset($mce[$editorId]) && is_array($mce[$editorId])) {
+                $entry['tinymce'] = self::jsonSafeInit($mce[$editorId]);
+            }
+            if (isset($qt[$editorId]) && is_array($qt[$editorId])) {
+                $entry['quicktags'] = self::jsonSafeInit($qt[$editorId]);
+            }
+            if ($entry) {
+                $out[$editorId] = $entry;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Make a TinyMCE / Quicktags init array JSON-safe.
+     *
+     * WordPress prints some values unquoted (they are JavaScript literals: see
+     * _WP_Editors::_parse_init(), e.g. external_plugins carries a JSON object as
+     * a string). JSON-encoding those would hand TinyMCE a string where it wants
+     * an object, so literal-looking strings are marked and revived client-side.
+     *
+     * @param array $init raw init array
+     */
+    private static function jsonSafeInit(array $init): array
+    {
+        $out = [];
+
+        foreach ($init as $key => $value) {
+            if (is_array($value)) {
+                $out[$key] = self::jsonSafeInit($value);
+                continue;
+            }
+
+            if (!is_string($value)) {
+                $out[$key] = $value;
+                continue;
+            }
+
+            $trimmed = trim($value);
+            $isLiteral = $trimmed !== '' && (
+                (str_starts_with($trimmed, '{') && str_ends_with($trimmed, '}'))
+                || (str_starts_with($trimmed, '[') && str_ends_with($trimmed, ']'))
+                || preg_match('#^/.+/[a-z]*$#i', $trimmed) === 1
+            );
+
+            $out[$key] = $isLiteral ? ['@radLiteral' => $trimmed] : $value;
+        }
+
+        return $out;
+    }
+
     /**
      * Find every companion template that has a yml file and parse its fields.
      *
@@ -191,7 +772,7 @@ class CompanionFields
      *     (`single-<type>.php`, `archive-<type>.php`) — keyed by their filename,
      *     with `post_type` set so the meta box can show when editing that CPT.
      *
-     * @return array<string, array{title: string, template: string, post_type: ?string, fields: array}>
+     * @return array<string, array{title: string, template: string, post_type: ?string, fields: array, sidebar_fields: array}>
      */
     public static function discover(): array
     {
@@ -267,7 +848,8 @@ class CompanionFields
 
     /**
      * Build a companion group from a yml file path. Returns null when there is
-     * no usable yml (no file, no `fields:` block, or empty).
+     * no usable yml (no file, no `fields:` or `sidebar_fields:` block, or both
+     * empty).
      *
      * @param string      $yml       absolute path to the yml file
      * @param string      $key       the group key (template file name, or `post-types/<type>`)
@@ -283,22 +865,38 @@ class CompanionFields
 
         $raw = Yaml::parseFile($yml);
 
-        if (!is_array($raw) || empty($raw['fields']) || !is_array($raw['fields'])) {
+        if (!is_array($raw)) {
+            return null;
+        }
+
+        $fieldsRaw = (isset($raw['fields']) && is_array($raw['fields'])) ? $raw['fields'] : [];
+        $sidebarRaw = (isset($raw['sidebar_fields']) && is_array($raw['sidebar_fields'])) ? $raw['sidebar_fields'] : [];
+
+        if (empty($fieldsRaw) && empty($sidebarRaw)) {
             return null;
         }
 
         // Top-level `imports:` shares slice layouts with every flexible field in
-        // this file (see resolveLayoutImports).
+        // this file (see resolveLayoutImports). Sidebar fields see the same
+        // imports as regular fields so a sidebar flexible can use shared slices.
         $errBefore = count(self::$importErrors);
         $importedLayouts = self::resolveLayoutImports(isset($raw['imports']) ? $raw['imports'] : null);
         $importErrors = array_slice(self::$importErrors, $errBefore);
 
         $fields = [];
-        foreach ($raw['fields'] as $name => $def) {
+        foreach ($fieldsRaw as $name => $def) {
             $fields[] = self::normalizeField($name, $def, $importedLayouts, $importErrors);
         }
 
-        if (empty($fields)) {
+        // `sidebar_fields:` mirrors `fields:` but renders into a companion meta
+        // box in the admin sidebar (right column) instead of the main editor
+        // column. Definitions use the same shape (same types, same storage).
+        $sidebarFields = [];
+        foreach ($sidebarRaw as $name => $def) {
+            $sidebarFields[] = self::normalizeField($name, $def, $importedLayouts, $importErrors);
+        }
+
+        if (empty($fields) && empty($sidebarFields)) {
             return null;
         }
 
@@ -307,6 +905,7 @@ class CompanionFields
             'template' => $key,
             'post_type' => $postType,
             'fields' => $fields,
+            'sidebar_fields' => $sidebarFields,
             'hidden' => self::normalizeHidden(isset($raw['hidden']) ? $raw['hidden'] : null),
         ];
     }
@@ -366,10 +965,20 @@ class CompanionFields
             'label' => $label,
         ];
 
-        foreach (['default', 'placeholder', 'options', 'required', 'hint'] as $key) {
+        // `instructions:` sits between the label and the control (the shape WP
+        // and ACF use for field guidance), `hint:` stays below the control, and
+        // `message:` is the text a `message` field renders on its own.
+        foreach (['default', 'placeholder', 'options', 'required', 'hint', 'instructions', 'message'] as $key) {
             if (isset($def[$key])) {
                 $field[$key] = $def[$key];
             }
+        }
+
+        // `section:` names the postbox an options page should file this field
+        // under (see OptionPages::boxes). Carried through here so the field
+        // keeps the key to the renderer; ignored everywhere else.
+        if (isset($def['section']) && trim((string) $def['section']) !== '') {
+            $field['section'] = (string) $def['section'];
         }
 
         // For repeater fields, `add button text:` sets the add button label
@@ -380,16 +989,36 @@ class CompanionFields
         }
 
         // For media fields, `output` controls how the stored attachment is
-        // resolved on the frontend (id / url / alt / html / array).
+        // resolved on the frontend (id / url / alt / html / array / object).
         if (isset($def['output'])) {
             $field['output'] = (string) $def['output'];
         }
 
-        // For select fields, a plain list of strings is promoted to a
+        // For media fields, `filetypes` narrows what the wp.media picker shows.
+        // Accepted: image (default), videos, documents, all. Anything else falls
+        // back to image so a typo never silently opens the whole library.
+        if ($type === 'media' && isset($def['filetypes'])) {
+            $filetypes = strtolower(trim((string) $def['filetypes']));
+            $field['filetypes'] = in_array($filetypes, self::MEDIA_FILETYPES, true)
+                ? $filetypes
+                : 'image';
+        }
+
+        // For select / radio fields, a plain list of strings is promoted to a
         // self-keyed map (key = value = text) so the stored value is the option
         // label itself. An explicit key/value map is left as-is.
-        if ($type === 'select' && isset($field['options']) && is_array($field['options'])) {
+        if (($type === 'select' || $type === 'radio') && isset($field['options']) && is_array($field['options'])) {
             $field['options'] = self::normalizeSelectOptions($field['options']);
+        }
+
+        // `show_if:` only shows this field while a sibling select / radio /
+        // checkbox (in the same box, repeater row or flexible block) holds one
+        // of the given values. See normalizeCondition() for accepted shapes.
+        if (isset($def['show_if'])) {
+            $condition = self::normalizeCondition($def['show_if']);
+            if ($condition !== null) {
+                $field['show_if'] = $condition;
+            }
         }
 
         // For repeater fields, `fields:` declares the sub-fields each row holds.
@@ -401,6 +1030,20 @@ class CompanionFields
                 $subs[] = self::normalizeField($subName, $subDef);
             }
             $field['fields'] = $subs;
+        }
+
+        // For repeater fields, `layout` picks the admin arrangement:
+        //   table   (default) — grid of columns (one per sub-field) with a head
+        //                       row; the horizontal table-style UI most people
+        //                       expect from an ACF-like repeater.
+        //   stacked — each row shows its sub-fields full-width and labelled,
+        //                       one per line. Better when a row has many
+        //                       sub-fields or wide inputs (media, wysiwyg, …).
+        // Unknown values fall back to table so a typo doesn't quietly switch
+        // a repeater to stacked.
+        if ($type === 'repeater' && isset($def['layout'])) {
+            $layout = strtolower(trim((string) $def['layout']));
+            $field['layout'] = in_array($layout, self::REPEATER_LAYOUTS, true) ? $layout : 'table';
         }
 
         // For flexible fields, `layouts:` declares the named blocks the editor
@@ -533,6 +1176,58 @@ class CompanionFields
     }
 
     /**
+     * Normalise a `show_if:` condition into ['field' => name, 'values' => [..]].
+     *
+     * Accepted yml shapes:
+     *   show_if: { field: cta_type, value: Link }        # one value
+     *   show_if: { field: cta_type, value: [Link, File] } # any of several
+     *   show_if: { has_cta: true }                       # shorthand
+     *   show_if: has_cta                                 # checkbox is ticked
+     *
+     * Booleans map onto checkbox storage (true -> '1', false -> ''), so
+     * `value: true` means "the checkbox is ticked". Returns null for anything
+     * unusable so a malformed condition never hides a field.
+     *
+     * @param mixed $raw
+     * @return array{field: string, values: string[]}|null
+     */
+    public static function normalizeCondition($raw): ?array
+    {
+        if (is_string($raw) && trim($raw) !== '') {
+            return ['field' => trim($raw), 'values' => ['1']];
+        }
+        if (!is_array($raw) || empty($raw)) {
+            return null;
+        }
+
+        if (isset($raw['field'])) {
+            $name = trim((string) $raw['field']);
+            $values = array_key_exists('value', $raw) ? $raw['value'] : (array_key_exists('values', $raw) ? $raw['values'] : true);
+        } elseif (count($raw) === 1) {
+            $name = trim((string) array_key_first($raw));
+            $values = reset($raw);
+        } else {
+            return null;
+        }
+
+        if ($name === '') {
+            return null;
+        }
+
+        $list = [];
+        foreach ((is_array($values) ? $values : [$values]) as $value) {
+            if (is_bool($value)) {
+                $value = $value ? '1' : '';
+            } elseif ($value === null) {
+                $value = '';
+            }
+            $list[] = (string) $value;
+        }
+
+        return ['field' => $name, 'values' => array_values(array_unique($list))];
+    }
+
+    /**
      * Normalise a select field's `options` so the stored value is meaningful.
      *
      * A plain list of strings (`[Red, Black, White]`) is promoted to a
@@ -648,12 +1343,79 @@ class CompanionFields
 
         $themeDir = get_template_directory();
         foreach ($candidates as $candidate) {
-            if (file_exists($themeDir . '/' . $candidate)) {
-                return get_template_directory_uri() . '/' . $candidate;
+            $file = $themeDir . '/' . $candidate;
+            if (!file_exists($file)) {
+                continue;
             }
+            $optimized = self::optimizedThumbnail($file);
+            return $optimized !== null ? $optimized : get_template_directory_uri() . '/' . $candidate;
         }
 
         return null;
+    }
+
+    /**
+     * Width picker thumbnails are downscaled to before serving. The picker
+     * shows each card at ~350 CSS px (~700 device px on retina), so anything
+     * wider than this buys nothing but decode time.
+     */
+    const THUMBNAIL_MAX_WIDTH = 1280;
+
+    /**
+     * Downscale/recompress a layout thumbnail for the picker.
+     *
+     * Any image wider than THUMBNAIL_MAX_WIDTH, or not already WebP, is
+     * converted once through wp_get_image_editor() into a cached WebP under
+     * wp-content/uploads/rad-flexible-thumbnails/, keyed by the source's
+     * path/size/mtime so editing the file regenerates it. Keeps the modal to
+     * a few hundred KB instead of making the browser decode and downsample
+     * multi-megabyte originals (which shows as blurry previews while loading).
+     * Returns null when the file is already fine, unreadable, or an SVG —
+     * the original theme URL is served in all those cases.
+     */
+    private static function optimizedThumbnail(string $file): ?string
+    {
+        $info = @getimagesize($file);
+        if ($info === false) {
+            return null;
+        }
+
+        $isWebp = strtolower((string) (isset($info['mime']) ? $info['mime'] : '')) === 'image/webp';
+        if ($isWebp && (int) $info[0] <= self::THUMBNAIL_MAX_WIDTH) {
+            return null;
+        }
+
+        $uploads = wp_upload_dir();
+        if (!empty($uploads['error']) || empty($uploads['basedir'])) {
+            return null;
+        }
+
+        $dir = $uploads['basedir'] . '/rad-flexible-thumbnails';
+        $key = substr(md5($file . '|' . filesize($file) . '|' . filemtime($file) . '|' . self::THUMBNAIL_MAX_WIDTH), 0, 12);
+        $slug = preg_replace('/[^a-zA-Z0-9_-]+/', '-', pathinfo($file, PATHINFO_FILENAME));
+        $name = $slug . '-' . $key . '.webp';
+        $dest = $dir . '/' . $name;
+
+        if (!file_exists($dest)) {
+            $editor = wp_get_image_editor($file);
+            if (is_wp_error($editor)) {
+                return null;
+            }
+            $size = $editor->get_size();
+            if ((int) $size['width'] > self::THUMBNAIL_MAX_WIDTH) {
+                if (is_wp_error($editor->resize(self::THUMBNAIL_MAX_WIDTH, self::THUMBNAIL_MAX_WIDTH, false))) {
+                    return null;
+                }
+            }
+            if (!wp_mkdir_p($dir)) {
+                return null;
+            }
+            if (is_wp_error($editor->save($dest, 'image/webp')) || !file_exists($dest)) {
+                return null;
+            }
+        }
+
+        return $uploads['baseurl'] . '/rad-flexible-thumbnails/' . rawurlencode($name);
     }
 
     /**
@@ -686,6 +1448,37 @@ class CompanionFields
             if (isset($field['layouts']) && is_array($field['layouts'])) {
                 foreach ($field['layouts'] as $layout) {
                     if (self::needsWysiwyg($layout['fields'] ?? [])) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Walk a normalised field tree (including repeater sub-fields and flexible
+     * layout fields) and report whether any of them is a media field. Used to
+     * decide whether to call wp_enqueue_media() on an admin screen — WP only
+     * auto-loads the media manager on post edit screens, so options pages,
+     * taxonomy term screens and any other custom admin page has to opt in
+     * explicitly for the "Choose Media" button to work.
+     *
+     * @param array $fields
+     * @return bool
+     */
+    public static function needsMedia(array $fields): bool
+    {
+        foreach ($fields as $field) {
+            if (($field['type'] ?? '') === 'media') {
+                return true;
+            }
+            if (isset($field['fields']) && self::needsMedia($field['fields'])) {
+                return true;
+            }
+            if (isset($field['layouts']) && is_array($field['layouts'])) {
+                foreach ($field['layouts'] as $layout) {
+                    if (self::needsMedia($layout['fields'] ?? [])) {
                         return true;
                     }
                 }
@@ -735,19 +1528,57 @@ class CompanionFields
     }
 
     /**
+     * Read the current post meta values for a set of companion fields, keyed by
+     * field name. Media and repeater values arrive from the DB serialized and
+     * are re-encoded as JSON so the admin inputs (which expect JSON strings) can
+     * hydrate directly.
+     *
+     * @param array $fields normalised field definitions
+     * @return array<string, mixed>
+     */
+    private static function valuesForFields(array $fields, int $postId): array
+    {
+        $values = [];
+        foreach ($fields as $field) {
+            $raw = get_post_meta($postId, 'rad_' . $field['name'], true);
+            if ($field['type'] === 'media' || $field['type'] === 'repeater') {
+                $decoded = self::unserializeValue($raw);
+                $values[$field['name']] = is_array($decoded) ? json_encode($decoded) : '';
+            } else {
+                $values[$field['name']] = $raw;
+            }
+        }
+        return $values;
+    }
+
+    /**
      * Render the full meta box contents (nonce + fields).
      *
-     * @param array<string, mixed> $values current post meta values keyed by field name
+     * @param array<string, mixed> $values     current post meta values keyed by field name
+     * @param string               $scope      id-only namespace (see previewScope())
+     * @param bool                 $withNonce  emit the per-template nonce field. The
+     *                                         page-preview container carries a single
+     *                                         shared nonce instead, so groups rendered
+     *                                         into it skip this (two `rad_companion_nonce`
+     *                                         inputs would otherwise fight on submit).
      */
-    public static function renderBox(string $boxId, string $template, array $fields, array $values = []): string
-    {
+    public static function renderBox(
+        string $boxId,
+        string $template,
+        array $fields,
+        array $values = [],
+        string $scope = '',
+        bool $withNonce = true
+    ): string {
         $fieldsHtml = [];
         foreach ($fields as $field) {
-            $fieldsHtml[] = self::renderField($field, $values[$field['name']] ?? '');
+            $fieldsHtml[] = self::renderField($field, $values[$field['name']] ?? '', $scope);
         }
 
         return FieldTemplates::render('box', [
-            'nonce' => wp_nonce_field('rad_companion_' . self::slug($template), 'rad_companion_nonce', true, false),
+            'nonce' => $withNonce
+                ? wp_nonce_field('rad_companion_' . self::slug($template), 'rad_companion_nonce', true, false)
+                : '',
             'fields' => implode('', $fieldsHtml),
         ]);
     }
@@ -766,14 +1597,26 @@ class CompanionFields
     /**
      * Render a single field, wrapped in a per-field container so the shared
      * stylesheet can manage field spacing/typography (see adminStyles()).
+     *
+     * @param string $scope id-only namespace, see previewScope(). It never touches
+     *                      `name` attributes (the save handler still reads
+     *                      `rad_<field name>`) or `data-rad-field` (so `show_if:`
+     *                      conditions keep matching on the bare yml key).
      */
-    public static function renderField(array $field, $value = ''): string
+    public static function renderField(array $field, $value = '', string $scope = ''): string
     {
         $type = isset($field['type']) ? $field['type'] : 'text';
+        $condition = isset($field['show_if']) && is_array($field['show_if']) ? $field['show_if'] : null;
         return FieldTemplates::render('field', [
             'typeClass' => self::dashedSlug($type),
+            // Un-scoped name (the yml key) so `show_if:` can find its sibling
+            // controller inside a repeater row / flexible block.
+            'fieldKey' => (string) ($field['base_name'] ?? $field['name']),
+            'hasCondition' => $condition !== null,
+            'conditionField' => $condition ? $condition['field'] : '',
+            'conditionValues' => $condition ? (string) json_encode($condition['values']) : '',
             'styles' => self::adminStyles(),
-            'inner' => self::renderFieldInner($field, $value),
+            'inner' => self::renderFieldInner($field, $value, $scope),
         ]);
     }
 
@@ -792,17 +1635,23 @@ class CompanionFields
         return '<style>'
             . CompanionAssets::file('companion-fields.css')
             . CompanionAssets::file('flexible-picker.css')
-            . '</style>';
+            . '</style>'
+            . CompanionAssets::script('conditions.js');
     }
 
     /**
      * Render a single field's control(s). Unknown / unimplemented types render
      * a visible placeholder instead of being silently dropped.
+     *
+     * `$id` is the submitted name (`rad_<field>`, always unscoped) and `$domId`
+     * is the same string with the optional preview namespace in front of it; only
+     * the latter lands in `id`/`for` attributes.
      */
-    private static function renderFieldInner(array $field, $value = ''): string
+    private static function renderFieldInner(array $field, $value = '', string $scope = ''): string
     {
         $type = $field['type'];
         $id = 'rad_' . $field['name'];
+        $domId = self::domId($id, $scope);
         $required = !empty($field['required']);
         $value = (string) $value;
 
@@ -812,6 +1661,16 @@ class CompanionFields
             $value = is_scalar($field['default']) ? (string) $field['default'] : '';
         }
 
+        // A `message` field is a note in the field list rather than a control,
+        // so it skips the label/hint wrapper entirely. Its text is kses'd here
+        // and printed unescaped by the template, which is what lets a note
+        // carry a link or emphasis.
+        if ($type === 'message') {
+            return FieldTemplates::render('message', [
+                'message' => wp_kses_post((string) ($field['message'] ?? '')),
+            ]);
+        }
+
         // Each branch builds only the control markup; the label and hint are
         // wrapped around it by field-inner.hbs so .rad-companion-field can lay
         // them out as a labelled row (label column on the left, control and
@@ -819,7 +1678,7 @@ class CompanionFields
         switch ($type) {
             case 'textarea':
                 $control = FieldTemplates::render('textarea', [
-                    'id' => $id,
+                    'id' => $domId,
                     'name' => $id,
                     'required' => $required,
                     'value' => $value,
@@ -846,8 +1705,36 @@ class CompanionFields
                     ];
                 }
                 $control = FieldTemplates::render('select', [
-                    'id' => $id,
+                    'id' => $domId,
                     'name' => $id,
+                    'required' => $required,
+                    'options' => $opts,
+                ]);
+                break;
+
+            case 'radio':
+                $options = isset($field['options']) ? (array) $field['options'] : [];
+                // Like select: with no value (and no `default`) the first
+                // option is pre-checked so the field always posts a value.
+                if ($value === '' && $options) {
+                    $value = (string) array_key_first($options);
+                }
+                $opts = [];
+                $n = 0;
+                foreach ($options as $optionValue => $text) {
+                    $optionValue = (string) $optionValue;
+                    $opts[] = [
+                        // The first radio carries the field id so the label's
+                        // `for` targets it; the rest get suffixed ids.
+                        'id' => $n === 0 ? $domId : $domId . '-' . $n,
+                        'name' => $id,
+                        'value' => $optionValue,
+                        'text' => (string) $text,
+                        'checked' => $value === $optionValue,
+                    ];
+                    $n++;
+                }
+                $control = FieldTemplates::render('radio', [
                     'required' => $required,
                     'options' => $opts,
                 ]);
@@ -857,7 +1744,7 @@ class CompanionFields
                 // The field label lives in the label column; its `for` still
                 // toggles the box, so the control is just the (styled) box.
                 $control = FieldTemplates::render('checkbox', [
-                    'id' => $id,
+                    'id' => $domId,
                     'name' => $id,
                     'checked' => $value === '1' || $value === true || $value === 'true',
                     'required' => $required,
@@ -865,19 +1752,19 @@ class CompanionFields
                 break;
 
             case 'media':
-                $control = self::renderMediaField($field, $value, $id);
+                $control = self::renderMediaField($field, $value, $id, $scope);
                 break;
 
             case 'repeater':
-                $control = self::renderRepeaterField($field, $value, $id);
+                $control = self::renderRepeaterField($field, $value, $id, $scope);
                 break;
 
             case 'flexible':
-                $control = self::renderFlexibleField($field, $value, $id);
+                $control = self::renderFlexibleField($field, $value, $id, $scope);
                 break;
 
             case 'wysiwyg':
-                $control = self::renderWysiwygField($field, $value, $id);
+                $control = self::renderWysiwygField($field, $value, $id, $scope);
                 break;
 
             // All single-line input types (text, email, number, url, ...)
@@ -892,9 +1779,15 @@ class CompanionFields
             case 'time':
             case 'week':
             case 'month':
+                // `url` renders as a plain text input (with the URL keyboard on
+                // mobile): the browser's type="url" check rejects relative
+                // links (/contact), anchors (#form), mailto:/tel: and bare
+                // domains, and blocks the whole post from saving. The value
+                // is still cleaned on save (see sanitizeUrl).
                 $control = FieldTemplates::render('input', [
-                    'type' => $type,
-                    'id' => $id,
+                    'type' => $type === 'url' ? 'text' : $type,
+                    'isUrl' => $type === 'url',
+                    'id' => $domId,
                     'name' => $id,
                     'required' => $required,
                     'value' => $value,
@@ -910,9 +1803,12 @@ class CompanionFields
 
         return FieldTemplates::render('field-inner', [
             'required' => $required,
-            'id' => $id,
+            'id' => $domId,
             'label' => (string) $field['label'],
             'control' => $control,
+            // kses'd here and printed unescaped, so instructions can carry a link
+            'hasInstructions' => isset($field['instructions']),
+            'instructions' => isset($field['instructions']) ? wp_kses_post((string) $field['instructions']) : '',
             'hasHint' => isset($field['hint']),
             'hint' => isset($field['hint']) ? (string) $field['hint'] : '',
         ]);
@@ -921,8 +1817,14 @@ class CompanionFields
     /**
      * Render a media (image) field. The attachment id is stored as JSON so the
      * frontend can resolve it to a url / alt / full array on demand.
+     *
+     * The picker's file-type filter (`filetypes:` in yml) and the stored
+     * attachment's top-level MIME (image vs file) both ride along as data-*
+     * attributes so media.js can (a) restrict the wp.media library query and
+     * (b) draw a filename tile instead of a broken <img> for PDFs / videos /
+     * other non-image attachments.
      */
-    private static function renderMediaField(array $field, $value, string $id): string
+    private static function renderMediaField(array $field, $value, string $id, string $scope = ''): string
     {
         $current = self::mediaValueToArray($value);
 
@@ -939,19 +1841,155 @@ class CompanionFields
             'alt' => (string) $currentAlt,
         ]);
 
-        $preview = $currentUrl !== ''
-            ? '<img class="rad-companion-media-img" src="' . esc_url($currentUrl) . '" alt="' . esc_attr($currentAlt) . '" />'
-            : '<p class="description">No media selected.</p>';
+        $filetypes = isset($field['filetypes']) && in_array($field['filetypes'], self::MEDIA_FILETYPES, true)
+            ? (string) $field['filetypes']
+            : 'image';
+
+        $attachmentType = self::attachmentTopLevelType((int) $currentId, (string) $currentUrl);
+        $mimeIcon = '';
+        if ((int) $currentId > 0 && $attachmentType !== 'image' && $currentUrl !== '') {
+            $iconUrl = wp_mime_type_icon((int) $currentId);
+            if (is_string($iconUrl) && $iconUrl !== '') {
+                $mimeIcon = $iconUrl;
+            }
+        }
+        $previewUrl = $attachmentType !== 'image' ? self::documentPreviewUrl((int) $currentId) : '';
+        $preview = self::mediaPreviewMarkup((int) $currentId, (string) $currentUrl, (string) $currentAlt, $attachmentType, $mimeIcon, $previewUrl);
 
         return FieldTemplates::render('media', [
             'fieldName' => $field['name'],
-            'id' => $id,
+            'wrapId' => 'rad-companion-media-' . $field['name'] . self::idSuffix($scope),
+            'id' => self::domId($id, $scope),
             'name' => $id,
             'json' => $inputValue,
             'currentId' => $currentId,
+            'filetypes' => $filetypes,
+            'attachmentType' => $attachmentType,
+            'mimeIcon' => $mimeIcon,
+            'previewUrl' => $previewUrl,
             'preview' => $preview,
             'script' => self::mediaScript(),
         ]);
+    }
+
+    /**
+     * Thumbnail URL for a non-image attachment (e.g. the first-page image
+     * WordPress generates for a PDF when Imagick + Ghostscript are available),
+     * or '' when it has none.
+     *
+     * Read from wp_prepare_attachment_for_js()'s `sizes` — the same data the
+     * wp.media picker hands media.js on select — so the preview looks the same
+     * before and after a save. A theme that makes its own PDF thumbnails can
+     * add them to that payload (`wp_prepare_attachment_for_js` filter) and
+     * they'll show here and in the media library.
+     */
+    private static function documentPreviewUrl(int $id): string
+    {
+        if ($id <= 0 || get_post_type($id) !== 'attachment') {
+            return '';
+        }
+
+        $att = wp_prepare_attachment_for_js($id);
+        $sizes = is_array($att) && isset($att['sizes']) && is_array($att['sizes']) ? $att['sizes'] : [];
+        foreach (['medium', 'thumbnail', 'full'] as $size) {
+            if (!empty($sizes[$size]['url'])) {
+                return (string) $sizes[$size]['url'];
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * Top-level MIME category for an attachment ('image', 'video',
+     * 'application', 'audio', or 'unknown'). Falls back to sniffing the stored
+     * URL extension when the attachment no longer exists so the admin doesn't
+     * render a broken <img> for a deleted file.
+     */
+    private static function attachmentTopLevelType(int $id, string $url = ''): string
+    {
+        if ($id > 0) {
+            $mime = get_post_mime_type($id);
+            if (is_string($mime) && $mime !== '' && strpos($mime, '/') !== false) {
+                return strtolower(substr($mime, 0, strpos($mime, '/')));
+            }
+        }
+
+        if ($url !== '') {
+            $ext = strtolower((string) pathinfo(wp_parse_url($url, PHP_URL_PATH) ?: $url, PATHINFO_EXTENSION));
+            if (in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif', 'bmp'], true)) {
+                return 'image';
+            }
+            if (in_array($ext, ['mp4', 'mov', 'webm', 'ogv', 'm4v'], true)) {
+                return 'video';
+            }
+            if (in_array($ext, ['mp3', 'wav', 'ogg', 'm4a'], true)) {
+                return 'audio';
+            }
+            if ($ext !== '') {
+                return 'application';
+            }
+        }
+
+        return 'unknown';
+    }
+
+    /**
+     * Preview markup for a media field's current value. Images get an <img>.
+     * Other files get a document preview with the filename underneath: the
+     * attachment's thumbnail when it has one, otherwise (PDFs only) the PDF
+     * itself in the browser's built-in viewer. Anything else gets a filename
+     * tile with the WP mime-type icon. Mirrors render() in media.js.
+     *
+     * @param string $mimeIcon   pre-resolved icon URL (see renderMediaField);
+     *                           the JS re-uses the same value via data-mime-icon.
+     * @param string $previewUrl thumbnail for a non-image file (documentPreviewUrl).
+     */
+    private static function mediaPreviewMarkup(int $id, string $url, string $alt, string $attachmentType, string $mimeIcon = '', string $previewUrl = ''): string
+    {
+        if ($url === '') {
+            return '<p class="description">No media selected.</p>';
+        }
+
+        if ($attachmentType === 'image') {
+            return '<img class="rad-companion-media-img" src="' . esc_url($url) . '" alt="' . esc_attr($alt) . '" />';
+        }
+
+        $isPdf = strtolower((string) pathinfo((string) wp_parse_url($url, PHP_URL_PATH), PATHINFO_EXTENSION)) === 'pdf';
+        if ($previewUrl !== '' || $isPdf) {
+            $page = $previewUrl !== ''
+                ? '<img src="' . esc_url($previewUrl) . '" alt="" />'
+                : '<iframe src="' . esc_url($url) . '#toolbar=0&amp;navpanes=0&amp;scrollbar=0&amp;view=FitH" title="PDF preview" tabindex="-1" loading="lazy"></iframe>';
+            $path = wp_parse_url($url, PHP_URL_PATH);
+            $file = $path ? basename((string) $path) : $url;
+
+            return '<figure class="rad-companion-media-doc">'
+                . '<span class="rad-companion-media-doc-page">' . $page . '</span>'
+                . '<figcaption class="rad-companion-media-file-name">' . esc_html($file) . '</figcaption>'
+                . '</figure>';
+        }
+
+        $icon = '';
+        if ($mimeIcon === '' && $id > 0) {
+            $iconUrl = wp_mime_type_icon($id);
+            if (is_string($iconUrl) && $iconUrl !== '') {
+                $mimeIcon = $iconUrl;
+            }
+        }
+        if ($mimeIcon !== '') {
+            $icon = '<img class="rad-companion-media-file-icon" src="' . esc_url($mimeIcon) . '" alt="" aria-hidden="true" />';
+        }
+
+        $name = $id > 0 ? get_the_title($id) : '';
+        if ($name === '' || $name === null) {
+            $path = wp_parse_url($url, PHP_URL_PATH);
+            $name = $path ? basename((string) $path) : $url;
+        }
+
+        return '<div class="rad-companion-media-file">'
+            . $icon
+            . '<span class="rad-companion-media-file-name">' . esc_html((string) $name) . '</span>'
+            . '</div>';
     }
 
     /**
@@ -962,12 +2000,14 @@ class CompanionFields
      * multiple wysiwyg fields (including nested ones in rows) coexist without
      * colliding.
      */
-    private static function renderWysiwygField(array $field, $value, string $id): string
+    private static function renderWysiwygField(array $field, $value, string $id, string $scope = ''): string
     {
         // Unique editor id derived from the (already unique) input id. The wp_editor
         // instance id must be alphanumeric without brackets, so map the scoped
-        // input id (e.g. rad_block-0[black_content]) to a safe editor token.
-        $editorId = 'rad_wysiwyg_' . self::dashedSlug(str_replace('rad_', '', $id));
+        // input id (e.g. rad_block-0[black_content]) to a safe editor token. The
+        // preview namespace rides along so two templates that both declare an
+        // `info_text` wysiwyg never register the same editor twice.
+        $editorId = 'rad_wysiwyg_' . self::dashedSlug(str_replace('rad_', '', $id) . self::idSuffix($scope));
 
         // wp_editor() echoes its markup and returns nothing, so capture it with an
         // output buffer. This keeps the editor HTML inside the string we return.
@@ -985,8 +2025,14 @@ class CompanionFields
         );
         $editor = ob_get_clean();
 
+        // Remember the id so the template-preview AJAX response can hand the
+        // editor's TinyMCE / Quicktags settings to the browser (they are normally
+        // printed by WordPress at admin_print_footer_scripts, which never fires in
+        // an admin-ajax request).
+        self::$renderedEditors[] = $editorId;
+
         return FieldTemplates::render('wysiwyg', [
-            'id' => 'rad-companion-wysiwyg-' . self::dashedSlug($id),
+            'id' => 'rad-companion-wysiwyg-' . self::dashedSlug($id . self::idSuffix($scope)),
             'editor' => $editor,
             'script' => self::wysiwygScript(),
         ]);
@@ -1007,7 +2053,7 @@ class CompanionFields
      * an "Add Row" button, per-row remove, and drag-and-drop reordering. The
      * hidden `rad_<name>` input holds the serialized JSON array submitted on save.
      */
-    private static function renderRepeaterField(array $field, $value, string $id): string
+    private static function renderRepeaterField(array $field, $value, string $id, string $scope = ''): string
     {
         $subFields = isset($field['fields']) ? $field['fields'] : [];
         // The add button text is explicit: `add button text:` in the yml, or a
@@ -1046,18 +2092,36 @@ class CompanionFields
         // template (gutter | N sub-field cells | actions) is identical on the
         // head and every row; it is inlined as a style because the column
         // count varies per repeater and CSS cannot repeat() on a variable.
+        // In `stacked` layout the head + inline grid style are dropped entirely
+        // and CSS drives a vertical arrangement off the wrapper modifier class
+        // (.rad-companion-repeater--stacked). Row/cell DOM is unchanged so all
+        // the add/remove/reorder/JSON-sync JS keeps working.
         $count = count($subFields);
+        $layout = isset($field['layout']) && in_array($field['layout'], self::REPEATER_LAYOUTS, true)
+            ? (string) $field['layout']
+            : 'table';
+        $isStacked = $layout === 'stacked';
+
         // Columns never shrink below 120px: past that the table keeps its
         // width and scrolls horizontally (see .rad-companion-repeater-table).
         // The shared min-width keeps the head and every row on identical
         // track widths so their columns stay aligned while scrolling.
-        $colsStyle = $count > 0
-            ? ' style="grid-template-columns:48px repeat(' . (int) $count . ', minmax(160px,1fr)) 64px;'
-            . 'min-width:' . (112 + 160 * (int) $count) . 'px"'
+        // Wide editors get wider tracks so a wysiwyg's toolbar and editing
+        // area aren't squeezed into a 160px column.
+        $tracks = [];
+        $minWidth = 112;
+        foreach ($subFields as $sub) {
+            [$min, $fr] = self::repeaterColumnSize((string) ($sub['type'] ?? 'text'));
+            $tracks[] = 'minmax(' . $min . 'px,' . $fr . 'fr)';
+            $minWidth += $min;
+        }
+        $colsStyle = (!$isStacked && $count > 0)
+            ? ' style="grid-template-columns:48px ' . implode(' ', $tracks) . ' 64px;'
+            . 'min-width:' . $minWidth . 'px"'
             : '';
 
         $head = '';
-        if ($count > 0) {
+        if (!$isStacked && $count > 0) {
             $headCells = [];
             foreach ($subFields as $sub) {
                 $headCells[] = ['label' => (string) $sub['label']];
@@ -1071,11 +2135,11 @@ class CompanionFields
         // Sub-field input names render as rad_<rowToken>[<sub>]. Using a short
         // row token (blank / row-N) avoids a double rad_ prefix and keeps the
         // JS name-matching regex simple.
-        $blankRow = self::renderRepeaterRow($subFields, [], 'blank', 1, $colsStyle);
+        $blankRow = self::renderRepeaterRow($subFields, [], 'blank', 1, $colsStyle, $scope);
 
         $existingRows = [];
         foreach ($rows as $i => $row) {
-            $existingRows[] = self::renderRepeaterRow($subFields, $row, 'row-' . $i, $i + 1, $colsStyle);
+            $existingRows[] = self::renderRepeaterRow($subFields, $row, 'row-' . (self::$rowSeq++), $i + 1, $colsStyle, $scope);
         }
 
         // The top-level hidden input carries the normalised rows as JSON so the
@@ -1085,7 +2149,10 @@ class CompanionFields
         return FieldTemplates::render('repeater', [
             'fieldName' => $field['name'],
             'itemLabel' => $itemLabel,
-            'id' => $id,
+            'layout' => $layout,
+            'wrapId' => 'rad-companion-repeater-' . $field['name'] . self::idSuffix($scope),
+            'templateId' => 'rad-companion-row-template-' . $field['name'] . self::idSuffix($scope),
+            'id' => self::domId($id, $scope),
             'name' => $id,
             'json' => $inputValue,
             'blankRow' => $blankRow,
@@ -1097,6 +2164,27 @@ class CompanionFields
     }
 
     /**
+     * Minimum width (px) and flex share (fr) of a table-repeater column for a
+     * sub-field type.
+     *
+     * @return array{0: int, 1: int}
+     */
+    private static function repeaterColumnSize(string $type): array
+    {
+        switch ($type) {
+            case 'wysiwyg':
+                return [420, 3];
+            case 'repeater':
+            case 'flexible':
+                return [360, 3];
+            case 'textarea':
+                return [240, 2];
+            default:
+                return [160, 1];
+        }
+    }
+
+    /**
      * Render a flexible field: a list of blocks, each tied to a named layout
      * from the yml `layouts:` map. A layout selector at the bottom lets the
      * editor add a block of any layout; each block is a draggable, removable box
@@ -1104,7 +2192,7 @@ class CompanionFields
      * (serialized array), except each row carries a `_layout` key so blocks keep
      * their identity.
      */
-    private static function renderFlexibleField(array $field, $value, string $id): string
+    private static function renderFlexibleField(array $field, $value, string $id, string $scope = ''): string
     {
         $layouts = isset($field['layouts']) && is_array($field['layouts']) ? $field['layouts'] : [];
 
@@ -1139,8 +2227,9 @@ class CompanionFields
             $safe = self::dashedSlug($layoutName);
             $templates[] = FieldTemplates::render('flexible-template', [
                 'fieldName' => $field['name'],
+                'templateId' => 'rad-flexible-template-' . $field['name'] . self::idSuffix($scope) . '-' . $safe,
                 'safe' => $safe,
-                'block' => self::renderFlexibleBlock($layout, [], 'blank-' . $safe),
+                'block' => self::renderFlexibleBlock($layout, [], 'blank-' . $safe, $scope),
             ]);
         }
 
@@ -1150,7 +2239,7 @@ class CompanionFields
             if (!$layout) {
                 continue;
             }
-            $existing[] = self::renderFlexibleBlock($layout, $block, 'block-' . $i);
+            $existing[] = self::renderFlexibleBlock($layout, $block, 'block-' . (self::$blockSeq++), $scope);
         }
 
         // Top-level hidden input carries the normalised blocks as JSON for the
@@ -1177,7 +2266,8 @@ class CompanionFields
 
         return FieldTemplates::render('flexible', [
             'fieldName' => $field['name'],
-            'id' => $id,
+            'wrapId' => 'rad-flexible-' . $field['name'] . self::idSuffix($scope),
+            'id' => self::domId($id, $scope),
             'name' => $id,
             'json' => $inputValue,
             'notices' => $notices,
@@ -1186,7 +2276,7 @@ class CompanionFields
             'bulkBottom' => $collapseAll('bottom'),
             'blocks' => implode('', $existing),
             'selector' => FieldTemplates::render('flexible-add', [
-                'modal' => self::flexiblePickerModal($field, $layouts),
+                'modal' => self::flexiblePickerModal($field, $layouts, $scope),
             ]),
             'script' => self::flexibleScript(),
         ]);
@@ -1200,7 +2290,7 @@ class CompanionFields
      * <body> the first time it is opened so fixed positioning escapes any
      * transformed/overflowed ancestors.
      */
-    private static function flexiblePickerModal(array $field, array $layouts): string
+    private static function flexiblePickerModal(array $field, array $layouts, string $scope = ''): string
     {
         $cards = [];
         foreach ($layouts as $layoutName => $layout) {
@@ -1223,6 +2313,7 @@ class CompanionFields
 
         return FieldTemplates::render('flexible-modal', [
             'fieldName' => $field['name'],
+            'modalId' => 'rad-flexible-modal-' . $field['name'] . self::idSuffix($scope),
             'cards' => implode('', $cards),
         ]);
     }
@@ -1236,7 +2327,7 @@ class CompanionFields
      * @param array $values  current values keyed by sub-field name (+ _layout)
      * @param string $blockKey unique per-block token (e.g. "block-0")
      */
-    private static function renderFlexibleBlock(array $layout, array $values, string $blockKey): string
+    private static function renderFlexibleBlock(array $layout, array $values, string $blockKey, string $scope = ''): string
     {
         $fieldsHtml = [];
         foreach ($layout['fields'] as $sub) {
@@ -1252,13 +2343,18 @@ class CompanionFields
                 $val = json_encode($val);
             }
             $scoped = self::scopeFieldName($sub, $blockKey);
-            $fieldsHtml[] = self::renderField($scoped, (string) $val);
+            $fieldsHtml[] = self::renderField($scoped, (string) $val, $scope);
         }
 
-        // Informational layouts (no fields) show their message instead.
-        $body = !empty($layout['message']) && empty($layout['fields'])
-            ? FieldTemplates::render('flexible-message', ['message' => (string) $layout['message']])
-            : implode('', $fieldsHtml);
+        // The layout message is a note for whoever edits the slice: it sits
+        // above the fields, and is the whole body for informational layouts
+        // that declare none. kses'd here and printed unescaped, so a note can
+        // carry a link or emphasis.
+        $message = !empty($layout['message'])
+            ? FieldTemplates::render('flexible-message', ['message' => wp_kses_post((string) $layout['message'])])
+            : '';
+
+        $body = $message . implode('', $fieldsHtml);
 
         return FieldTemplates::render('flexible-block', [
             'layoutName' => $layout['name'],
@@ -1313,7 +2409,7 @@ class CompanionFields
      * @param int    $number  1-based row number shown in the gutter
      * @param string $colsStyle grid-template-columns style, shared with the head
      */
-    private static function renderRepeaterRow(array $subFields, array $rowValues, string $rowKey, int $number = 1, string $colsStyle = ''): string
+    private static function renderRepeaterRow(array $subFields, array $rowValues, string $rowKey, int $number = 1, string $colsStyle = '', string $scope = ''): string
     {
         $cells = [];
         foreach ($subFields as $sub) {
@@ -1333,7 +2429,7 @@ class CompanionFields
             }
             $cells[] = FieldTemplates::render('repeater-cell', [
                 'class' => 'rad-companion-repeater-cell rad-companion-repeater-cell--' . self::dashedSlug($sub['name']),
-                'html' => self::renderField(self::scopeFieldName($sub, $rowKey), (string) $val),
+                'html' => self::renderField(self::scopeFieldName($sub, $rowKey), (string) $val, $scope),
             ]);
         }
 
@@ -1352,6 +2448,7 @@ class CompanionFields
     private static function scopeFieldName(array $sub, string $rowKey): array
     {
         $scoped = $sub;
+        $scoped['base_name'] = $sub['base_name'] ?? $sub['name'];
         $scoped['name'] = $rowKey . '[' . $sub['name'] . ']';
         return $scoped;
     }
@@ -1371,17 +2468,48 @@ class CompanionFields
 
         $template = get_post_meta($post_id, '_wp_page_template', true);
 
+        // The page template preview container posts one shared nonce plus the
+        // template that was selected when the form was submitted. WordPress has
+        // already written `_wp_page_template` by the time save_post fires, so this
+        // normally agrees with $template; it is what lets a group whose fields were
+        // rendered by AJAX (and so never emitted their own nonce) be saved.
+        $previewTemplate = isset($_POST['rad_companion_preview_template'])
+            ? (string) wp_unslash($_POST['rad_companion_preview_template'])
+            : '';
+        $previewNonce = isset($_POST['rad_companion_preview_nonce'])
+            ? sanitize_text_field(wp_unslash($_POST['rad_companion_preview_nonce']))
+            : '';
+        $previewVerified = $previewTemplate !== ''
+            && wp_verify_nonce($previewNonce, 'rad_companion_preview_' . $post_id);
+
         foreach ($groups as $filename => $meta) {
-            if (!self::groupAppliesTo($meta, $post, $template)) {
+            $fromPreview = $previewVerified
+                && $filename === $previewTemplate
+                && ($meta['post_type'] ?? null) === null;
+
+            if (!$fromPreview && !self::groupAppliesTo($meta, $post, $template)) {
                 continue;
             }
 
-            $nonce = isset($_POST['rad_companion_nonce']) ? sanitize_text_field(wp_unslash($_POST['rad_companion_nonce'])) : '';
-            if (!wp_verify_nonce($nonce, 'rad_companion_' . self::slug($filename))) {
-                return;
+            if (!$fromPreview) {
+                $nonce = isset($_POST['rad_companion_nonce']) ? sanitize_text_field(wp_unslash($_POST['rad_companion_nonce'])) : '';
+                if (!wp_verify_nonce($nonce, 'rad_companion_' . self::slug($filename))) {
+                    return;
+                }
             }
 
-            foreach ($meta['fields'] as $field) {
+            // Main-column fields and sidebar-column fields share one nonce and
+            // one storage scheme (`rad_<name>` post meta), so both sets persist
+            // through the same loop.
+            $fieldsToSave = array_merge($meta['fields'], $meta['sidebar_fields'] ?? []);
+
+            foreach ($fieldsToSave as $field) {
+                // A note renders no control, so there is nothing posted for it
+                // and no meta to write (or blank out).
+                if (in_array($field['type'], self::NON_INPUT_TYPES, true)) {
+                    continue;
+                }
+
                 $input = 'rad_' . $field['name'];
 
                 if (!isset($_POST[$input])) {
@@ -1475,7 +2603,7 @@ class CompanionFields
                 return is_email($value) ? $value : '';
 
             case 'url':
-                return (string) esc_url_raw($value);
+                return self::sanitizeUrl((string) $value);
 
             case 'wysiwyg':
                 // Rich HTML authored in TinyMCE. Strip disallowed tags/attrs.
@@ -1484,6 +2612,30 @@ class CompanionFields
             default:
                 return (string) wp_kses_post($value);
         }
+    }
+
+    /**
+     * Lenient URL cleaning for `url` fields. Accepts absolute URLs, relative
+     * paths (/about), anchors (#contact), query strings, mailto:/tel: links and
+     * bare domains — `www.example.com` or `example.com/page` gain `https://`
+     * rather than WordPress's default `http://`. Anything esc_url_raw rejects
+     * (e.g. a javascript: URL) still comes back empty.
+     */
+    public static function sanitizeUrl(string $value): string
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return '';
+        }
+
+        $hasScheme = (bool) preg_match('#^[a-z][a-z0-9+\-]*:#i', $value);
+        $isRelative = strpos($value, '/') === 0 || strpos($value, '#') === 0 || strpos($value, '?') === 0;
+
+        if (!$hasScheme && !$isRelative && preg_match('#^(www\.|[a-z0-9\-]+(\.[a-z0-9\-]+)*\.[a-z]{2,})([/?\#:]|$)#i', $value)) {
+            $value = 'https://' . $value;
+        }
+
+        return (string) esc_url_raw($value);
     }
 
     /**
@@ -1521,7 +2673,17 @@ class CompanionFields
 
         $resolved = self::resolveField($name, $post);
 
-        return is_string($resolved) ? $resolved : '';
+        // Scalars pass through unchanged; arrays (e.g. `output: object`) are
+        // JSON-encoded so the `{{ rad.<name>-JSON }}` filter can still inline
+        // them into post content.
+        if (is_string($resolved)) {
+            return $resolved;
+        }
+        if (is_array($resolved)) {
+            return (string) json_encode($resolved);
+        }
+
+        return '';
     }
 
     /**
@@ -1650,7 +2812,8 @@ class CompanionFields
 
         $field = null;
         foreach ($groups as $meta) {
-            foreach ($meta['fields'] as $f) {
+            $candidates = array_merge($meta['fields'], $meta['sidebar_fields'] ?? []);
+            foreach ($candidates as $f) {
                 if ($f['name'] === $name) {
                     $field = $f;
                     break 2;
@@ -1774,9 +2937,12 @@ class CompanionFields
      * works for any source (post meta, site options) as long as the stored value
      * is the serialized/JSON media shape produced by {@see sanitizeValue()}.
      *
-     * @return string
+     * Scalars (id / url / alt / html / array-as-json) come back as strings;
+     * `object` returns the attachment as an array (see mediaToOutput).
+     *
+     * @return mixed
      */
-    public static function resolveMediaValue(array $field, $raw): string
+    public static function resolveMediaValue(array $field, $raw)
     {
         if ($raw === '' || $raw === null) {
             return '';
@@ -1795,9 +2961,9 @@ class CompanionFields
     /**
      * Resolve a media field to its yml `output` for a given post.
      *
-     * @return string
+     * @return mixed
      */
-    private static function resolveMediaFor(string $name, $post, array $field): string
+    private static function resolveMediaFor(string $name, $post, array $field)
     {
         $raw = get_post_meta($post->ID, 'rad_' . $name, true);
         if ($raw === '' || $raw === null) {
@@ -1888,10 +3054,16 @@ class CompanionFields
     /**
      * Turn a stored attachment id into the requested output type.
      *
+     * Scalars (`id`, `url`, `alt`, `html`, `array`) come back as strings to
+     * preserve the historical return shape. `object` returns the attachment as
+     * an array shaped like `wp_prepare_attachment_for_js()` (url, link, alt,
+     * title, mime, type, subtype, width/height, sizes, icon, ...) so template
+     * authors can traverse the whole attachment record.
+     *
      * @param array|null $decoded the saved JSON (may carry url/alt fallbacks)
-     * @return string
+     * @return mixed
      */
-    private static function mediaToOutput(int $id, ?array $decoded, string $output): string
+    private static function mediaToOutput(int $id, ?array $decoded, string $output)
     {
         $meta = wp_get_attachment_metadata($id) ?: [];
         $url = $meta['url'] ?? wp_get_attachment_url($id);
@@ -1909,6 +3081,10 @@ class CompanionFields
 
             case 'html':
                 return wp_get_attachment_image($id, 'full', false, ['alt' => $alt]);
+
+            case 'object':
+                $prepared = wp_prepare_attachment_for_js($id);
+                return is_array($prepared) ? $prepared : [];
 
             case 'array':
                 return json_encode([
@@ -1928,6 +3104,31 @@ class CompanionFields
     private static function slug(string $value): string
     {
         return str_replace(['/', '.php'], '', strtolower($value));
+    }
+
+    /**
+     * Id namespace for a companion group rendered inside the page template
+     * preview container (see registerTemplatePreviewBoxes()).
+     *
+     * The token is appended to ids (never prefixed) so the element ids the admin
+     * scripts reverse-engineer keep working: media.js hydrates
+     * `[id^=rad-companion-media-]`, and flexible.js / repeater.js strip a fixed
+     * prefix off the wrapper id to find its `<template>` / modal. Appending also
+     * keeps rekey.js's `rad_<rowKey>[` search intact for cloned repeater rows and
+     * flexible blocks.
+     */
+    private static function idSuffix(string $scope): string
+    {
+        return $scope === '' ? '' : '__' . $scope;
+    }
+
+    /**
+     * Namespaced DOM id for a field's submitted name (`rad_<field>`). The name
+     * itself is never namespaced: the save handler reads `rad_<field>` verbatim.
+     */
+    private static function domId(string $id, string $scope): string
+    {
+        return $id . self::idSuffix($scope);
     }
 
     /**

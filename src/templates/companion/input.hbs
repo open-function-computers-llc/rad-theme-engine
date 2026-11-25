@@ -1,1 +1,1 @@
-<input type="{{type}}" id="{{id}}" name="{{name}}"{{#if required}} required{{/if}} value="{{value}}"{{#if hasPlaceholder}} placeholder="{{placeholder}}"{{/if}} />
+<input type="{{type}}" id="{{id}}" name="{{name}}"{{#if required}} required{{/if}}{{#if isUrl}} inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" class="rad-companion-url"{{/if}} value="{{value}}"{{#if hasPlaceholder}} placeholder="{{placeholder}}"{{/if}} />
